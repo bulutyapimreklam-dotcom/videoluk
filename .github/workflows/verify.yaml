@@ -31,6 +31,7 @@ jobs:
       - name: Validate production compose and Caddy
         run: |
           password_hash="$(docker run --rm caddy:2-alpine caddy hash-password --plaintext test-password)"
+          cp .env.example .env
           VIDEOLUK_BASIC_AUTH_HASH="$password_hash" docker compose -f deploy/compose.production.yaml config >/dev/null
           docker run --rm \
             -e VIDEOLUK_DOMAIN=localhost \
