@@ -11,6 +11,7 @@ import hashlib
 import html
 import mimetypes
 import os
+from concurrent.futures import ThreadPoolExecutor
 import shutil
 import sqlite3
 import subprocess
@@ -43,7 +44,11 @@ LLM_API_KEY = os.getenv("VIDEOLUK_LLM_API_KEY", "")
 LLM_TIMEOUT = int(os.getenv("VIDEOLUK_LLM_TIMEOUT", "60"))
 PEXELS_API_KEY = os.getenv("VIDEOLUK_PEXELS_API_KEY", "")
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
+RENDER_WORKERS = max(1, min(4, int(os.getenv("VIDEOLUK_RENDER_WORKERS", "1"))))
+MAX_QUEUED_RENDERS = max(1, int(os.getenv("VIDEOLUK_MAX_QUEUED_RENDERS", "8")))
+ALLOWED_ORIGIN = os.getenv("VIDEOLUK_ALLOWED_ORIGIN", "").rstrip("/")
 DB_LOCK = threading.Lock()
+RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=RENDER_WORKERS, thread_name_prefix="videoluk-render")
 
 
 def ffmpeg_has_filter(filter_name: str) -> bool:
@@ -112,6 +117,14 @@ def update_job(job_id: str, **values: object) -> None:
             f"UPDATE render_jobs SET {columns} WHERE id = ?",
             [*values.values(), job_id],
         )
+
+
+def active_render_count() -> int:
+    with db() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS total FROM render_jobs WHERE status IN ('queued', 'rendering')"
+        ).fetchone()
+    return int(row["total"])
 
 
 def srt_time(seconds: float) -> str:
@@ -604,6 +617,33 @@ def render(job_id: str, project: dict) -> None:
         update_job(job_id, status="failed", error=str(exc), progress=0)
 
 
+def submit_render(job_id: str, project: dict) -> None:
+    RENDER_EXECUTOR.submit(render, job_id, project)
+
+
+def resume_incomplete_renders() -> int:
+    with DB_LOCK, db() as connection:
+        rows = connection.execute(
+            """
+            SELECT render_jobs.id AS job_id, projects.id AS project_id, projects.payload AS payload
+            FROM render_jobs
+            JOIN projects ON projects.id = render_jobs.project_id
+            WHERE render_jobs.status IN ('queued', 'rendering')
+            ORDER BY render_jobs.created_at ASC
+            """
+        ).fetchall()
+        connection.execute(
+            "UPDATE render_jobs SET status = 'queued', progress = 0, error = NULL, updated_at = ? "
+            "WHERE status IN ('queued', 'rendering')",
+            (now(),),
+        )
+    for row in rows[:MAX_QUEUED_RENDERS]:
+        submit_render(row["job_id"], {"id": row["project_id"], "payload": json.loads(row["payload"])})
+    for row in rows[MAX_QUEUED_RENDERS:]:
+        update_job(row["job_id"], status="failed", error="Render kuyruğu sınırı aşıldı", progress=0)
+    return min(len(rows), MAX_QUEUED_RENDERS)
+
+
 class VideolukHandler(SimpleHTTPRequestHandler):
     server_version = "Videoluk/0.1"
 
@@ -611,10 +651,22 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(DIST), **kwargs)
 
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        origin = self.headers.get("Origin", "").rstrip("/")
+        if ALLOWED_ORIGIN and origin == ALLOWED_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Vary", "Origin")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data: https:; media-src 'self' blob:; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; connect-src 'self'",
+        )
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
@@ -631,6 +683,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
@@ -671,20 +724,27 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 return
             if route == "/api/renders":
                 project_id = str(body.get("projectId") or "")
-                with db() as connection:
-                    row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-                if not row:
-                    self.send_json(HTTPStatus.NOT_FOUND, {"error": "Proje bulunamadı"})
-                    return
                 job_id = str(uuid.uuid4())
                 timestamp = now()
                 with DB_LOCK, db() as connection:
+                    active = connection.execute(
+                        "SELECT COUNT(*) AS total FROM render_jobs WHERE status IN ('queued', 'rendering')"
+                    ).fetchone()["total"]
+                    if active >= MAX_QUEUED_RENDERS:
+                        self.send_json(HTTPStatus.TOO_MANY_REQUESTS, {
+                            "error": "Render kuyruğu dolu. Lütfen mevcut işlerin tamamlanmasını bekleyin."
+                        })
+                        return
+                    row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+                    if not row:
+                        self.send_json(HTTPStatus.NOT_FOUND, {"error": "Proje bulunamadı"})
+                        return
                     connection.execute(
                         "INSERT INTO render_jobs (id, project_id, status, progress, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                         (job_id, project_id, "queued", 0, timestamp, timestamp),
                     )
                 project = {"id": row["id"], "payload": json.loads(row["payload"])}
-                threading.Thread(target=render, args=(job_id, project), daemon=True).start()
+                submit_render(job_id, project)
                 self.send_json(HTTPStatus.ACCEPTED, {"id": job_id, "status": "queued", "progress": 0})
                 return
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Bilinmeyen uç nokta"})
@@ -756,11 +816,13 @@ class VideolukHandler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     initialize()
+    resumed = resume_incomplete_renders()
     server = ThreadingHTTPServer((HOST, PORT), VideolukHandler)
-    print(f"Videoluk hazır: http://{HOST}:{PORT}", flush=True)
+    print(f"Videoluk hazır: http://{HOST}:{PORT} (render worker: {RENDER_WORKERS}, devam eden: {resumed})", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        RENDER_EXECUTOR.shutdown(wait=False, cancel_futures=False)

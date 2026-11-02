@@ -32,6 +32,8 @@ services:
       - "443:443"
     environment:
       VIDEOLUK_DOMAIN: ${VIDEOLUK_DOMAIN:-localhost}
+      VIDEOLUK_BASIC_AUTH_USER: ${VIDEOLUK_BASIC_AUTH_USER:-videoluk}
+      VIDEOLUK_BASIC_AUTH_HASH: ${VIDEOLUK_BASIC_AUTH_HASH:?VIDEOLUK_BASIC_AUTH_HASH must be set}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

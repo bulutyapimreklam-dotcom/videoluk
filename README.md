@@ -33,6 +33,16 @@ docker compose -f compose.production.yaml up -d --build
 
 `VIDEOLUK_DOMAIN` gerçek alan adına ayarlandığında Caddy TLS sertifikasını otomatik yönetir. DNS kaydının sunucu IP adresine yönlenmiş, 80 ve 443 portlarının açık olması gerekir. Uygulama container'ı dışarıya doğrudan açılmaz; yalnızca Caddy üzerinden erişilir.
 
+Üretim kurulumu HTTP Basic Auth ile korunur. Parola hash'ini sunucuda üretin ve çıktıyı `.env` dosyasındaki `VIDEOLUK_BASIC_AUTH_HASH` alanına tek tırnak içinde yazın:
+
+```bash
+docker run --rm caddy:2-alpine caddy hash-password --plaintext 'uzun-ve-guclu-parolaniz'
+```
+
+Bu koruma ilk özel beta içindir; uygulama internete parolasız açılmaz. İleride çok kullanıcılı hesap sistemi eklendiğinde Caddy katmanındaki geçici beta parolası kaldırılabilir.
+
+Render motoru varsayılan olarak bir işi aynı anda çalıştırır ve en fazla sekiz işi kuyruğa alır. Uygun CPU kapasitesi varsa `.env` içinde `VIDEOLUK_RENDER_WORKERS` artırılabilir. Sunucu yeniden başladığında `queued` veya `rendering` durumunda kalan işler otomatik olarak güvenli biçimde yeniden kuyruğa alınır.
+
 Sağlık kontrolü:
 
 ```bash
@@ -73,3 +83,11 @@ Seslendirme sunucuda üretilir. macOS geliştirme ortamında sistemdeki `say`, D
 - `GET /api/renders/:id/subtitles`
 
 Render işleri arka planda FFmpeg ile yürütülür. Dikey, yatay ve kare 1080p çıktı desteklenir.
+
+## Beta güvenlik sınırları
+
+- API yalnızca aynı origin üzerinden erişime açıktır; ayrı bir web alanı kullanılacaksa `VIDEOLUK_ALLOWED_ORIGIN` açıkça tanımlanır.
+- İstek gövdeleri 1 MB ile, stok medya indirmeleri 200 MB ile sınırlandırılır.
+- Üretim trafiği Caddy HTTPS ve Basic Auth katmanından geçer.
+- Render paralelliği ve kuyruk uzunluğu ortam değişkenleriyle sınırlıdır.
+- API yanıtları önbelleğe alınmaz; iframe, kamera, mikrofon ve konum erişimi güvenlik başlıklarıyla kapatılır.

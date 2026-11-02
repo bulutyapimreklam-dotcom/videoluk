@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 import server
@@ -34,6 +35,51 @@ class VideolukCoreTests(unittest.TestCase):
         ], 6)
         self.assertIn("00:00:00,000 --> 00:00:02,000", srt)
         self.assertIn("00:00:02,000 --> 00:00:06,000", srt)
+
+    def test_incomplete_renders_are_resumed_after_restart(self):
+        originals = {
+            "DATA": server.DATA,
+            "OUTPUTS": server.OUTPUTS,
+            "VOICES": server.VOICES,
+            "MEDIA_CACHE": server.MEDIA_CACHE,
+            "DB_PATH": server.DB_PATH,
+            "submit_render": server.submit_render,
+        }
+        submitted = []
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root
+                server.OUTPUTS = root / "renders"
+                server.VOICES = root / "voices"
+                server.MEDIA_CACHE = root / "media-cache"
+                server.DB_PATH = root / "videoluk.db"
+                server.submit_render = lambda job_id, project: submitted.append((job_id, project))
+                server.initialize()
+                stamp = server.now()
+                payload = json.dumps({"duration": 3, "scenes": []})
+                with server.db() as connection:
+                    connection.execute(
+                        "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
+                        ("project-1", "Test", payload, stamp, stamp),
+                    )
+                    for job_id, status in (("job-1", "queued"), ("job-2", "rendering"), ("job-3", "completed")):
+                        connection.execute(
+                            "INSERT INTO render_jobs (id, project_id, status, progress, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (job_id, "project-1", status, 50, stamp, stamp),
+                        )
+                self.assertEqual(2, server.active_render_count())
+                self.assertEqual(2, server.resume_incomplete_renders())
+                self.assertEqual(["job-1", "job-2"], [item[0] for item in submitted])
+                with server.db() as connection:
+                    states = dict(connection.execute("SELECT id, status FROM render_jobs"))
+                self.assertEqual("queued", states["job-1"])
+                self.assertEqual("queued", states["job-2"])
+                self.assertEqual("completed", states["job-3"])
+        finally:
+            for name, value in originals.items():
+                setattr(server, name, value)
 
 
 if __name__ == "__main__":
