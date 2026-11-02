@@ -1,4 +1,5 @@
 data/
 __pycache__/
+.gh-config/
 *.pyc
 .DS_Store
