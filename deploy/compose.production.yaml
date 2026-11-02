@@ -1,0 +1,43 @@
+services:
+  videoluk:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8787"
+    volumes:
+      - videoluk-data:/data
+    env_file:
+      - ../.env
+    environment:
+      VIDEOLUK_HOST: 0.0.0.0
+      VIDEOLUK_PORT: 8787
+      VIDEOLUK_DATA_DIR: /data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      videoluk:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      VIDEOLUK_DOMAIN: ${VIDEOLUK_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  videoluk-data:
+  caddy-data:
+  caddy-config:

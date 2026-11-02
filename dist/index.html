@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Videoluk — Yapay Zekâ Video Stüdyosu</title>
+  <meta name="description" content="Fikirden yayına, yapay zekâ destekli video üretim stüdyosu." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=2" />
+  <link rel="stylesheet" href="features.css?v=4" />
+  <link rel="stylesheet" href="responsive.css?v=4" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#"><span class="brandmark">V</span><span>Videoluk</span></a>
+    <nav class="steps" aria-label="Proje adımları">
+      <button class="step active" data-step="1"><b>1</b><span>Format</span></button><i></i>
+      <button class="step" data-step="2"><b>2</b><span>İçerik</span></button><i></i>
+      <button class="step" data-step="3"><b>3</b><span>Stüdyo</span></button>
+    </nav>
+    <div class="top-actions"><button class="icon-btn" title="Yardım">?</button><button class="avatar">A</button></div>
+  </header>
+
+  <main>
+    <section class="panel active" id="step-1">
+      <div class="intro"><span class="eyebrow">YENİ PROJE</span><h1>Ne anlatmak istiyorsun?</h1><p>Formatını seç, hikâyeni yaz. Kurguyu birlikte tamamlayalım.</p></div>
+      <div class="workspace setup-grid">
+        <div>
+          <div class="section-title"><h2>Video türü</h2><span>01</span></div>
+          <div class="type-grid" id="typeGrid">
+            <button class="type-card selected" data-type="Sosyal Medya"><span class="type-icon coral">#</span><strong>Sosyal Medya</strong><small>Reels, Shorts, TikTok</small><em>9:16</em></button>
+            <button class="type-card" data-type="Tanıtım"><span class="type-icon blue">▶</span><strong>Tanıtım</strong><small>Ürün & marka filmi</small><em>16:9</em></button>
+            <button class="type-card" data-type="Eğitim"><span class="type-icon lime">✦</span><strong>Eğitim</strong><small>Anlatım & explainer</small><em>16:9</em></button>
+            <button class="type-card" data-type="Hikâye"><span class="type-icon violet">◒</span><strong>Hikâye</strong><small>Sinematik anlatı</small><em>21:9</em></button>
+          </div>
+        </div>
+        <aside class="settings-card">
+          <div class="section-title"><h2>Üretim ayarları</h2><span>02</span></div>
+          <label>Süre <output id="durationOut">30 saniye</output></label>
+          <input id="duration" type="range" min="15" max="90" step="15" value="30" />
+          <div class="range-labels"><span>15 sn</span><span>90 sn</span></div>
+          <label>Video yönü</label>
+          <div class="orientation-toggle" id="orientationToggle">
+            <button class="selected" data-orientation="vertical"><span class="ratio-icon vertical"></span><b>Dikey</b><small>9:16</small></button>
+            <button data-orientation="horizontal"><span class="ratio-icon horizontal"></span><b>Yatay</b><small>16:9</small></button>
+            <button data-orientation="square"><span class="ratio-icon square"></span><b>Kare</b><small>1:1</small></button>
+          </div>
+          <label>Görsel kaynağı</label>
+          <div class="source-toggle">
+            <button class="selected" data-source="Yapay zekâ"><span>✦</span>Yapay zekâ</button>
+            <button data-source="Stok görüntü"><span>▣</span>Stok görüntü</button>
+          </div>
+          <label>Anlatım tonu</label>
+          <select id="tone"><option>Enerjik & dinamik</option><option>Sakin & güven veren</option><option>Sinematik & dramatik</option><option>Bilgilendirici</option></select>
+          <button class="primary next" data-next="2">İçeriği oluştur <span>→</span></button>
+        </aside>
+      </div>
+    </section>
+
+    <section class="panel" id="step-2">
+      <div class="content-head"><button class="back" data-next="1">← Geri</button><div><span class="eyebrow">SENARYO ATÖLYESİ</span><h1>Hikâyenin özü ne?</h1></div><div class="project-pill"><span></span><b id="projectType">Sosyal Medya</b> · <i id="projectDuration">30 sn</i></div></div>
+      <div class="workspace script-layout">
+        <section class="script-card">
+          <div class="idea-block"><div class="field-heading"><div><span class="eyebrow">01 · FİKRİN</span><h2>Videon ne hakkında?</h2></div><span id="ideaCount">0 / 600</span></div><textarea id="idea" maxlength="600" placeholder="Örnek: Mahalle esnafını müşterilerle buluşturan hızlı teslimat uygulamamızı anlat..."></textarea><div class="example-prompts"><span>Örnek:</span><button>“Yeni nesil kahve deneyimi”</button><button>“Şehirde sürdürülebilir yaşam”</button></div><div class="generation-row"><button class="generate-script" id="writeScript"><span>✦</span> Metni oluştur</button><small class="engine-status" id="engineStatus"><i></i> Metin motoru kontrol ediliyor</small></div></div>
+          <div class="script-editor"><div class="field-heading"><div><span class="eyebrow">02 · OLUŞAN METİN</span><h2>Metni düzenle</h2></div><span id="charCount">0 / 1800</span></div><textarea id="script" maxlength="1800" placeholder="Fikrini yazıp “Metni oluştur” düğmesine bas. Oluşan metni burada özgürce değiştirebilirsin."></textarea><div class="edit-note"><span>✓</span> Metindeki tüm değişikliklerin sahne ve seslendirmeye aktarılır.</div></div>
+        </section>
+        <aside class="story-preview">
+          <span class="eyebrow">AKIŞ ÖNİZLEMESİ</span>
+          <div class="flow-item"><b>01</b><div><strong>Kanca</strong><small>İlk 3 saniyede dikkat çek</small></div><time>0–3 sn</time></div>
+          <div class="flow-item"><b>02</b><div><strong>Ana fikir</strong><small>Mesajı görsel hikâyeyle anlat</small></div><time>3–24 sn</time></div>
+          <div class="flow-item"><b>03</b><div><strong>Kapanış</strong><small>Net bir çağrıyla bitir</small></div><time>24–30 sn</time></div>
+          <div class="voice-row"><div class="voice-avatar">EL</div><div><strong>Ela</strong><small id="voiceStatus">Türkçe · Seslendirme hazır değil</small></div><button id="voicePlay">▶ Üret & dinle</button></div>
+          <button class="primary" id="generateBtn">Sahneleri oluştur <span>✦</span></button>
+        </aside>
+      </div>
+    </section>
+
+    <section class="panel studio" id="step-3">
+      <div class="studio-toolbar"><button class="brand compact" aria-label="Videoluk"><span class="brandmark">V</span></button><div class="project-name"><b>Şehirde Yeni Bir Ritim</b><span>Kaydedildi</span></div><div class="toolbar-center"><button title="Geri al">↶</button><button title="İleri al">↷</button><span></span><button id="zoomOut">−</button><output id="zoomValue">100%</output><button id="zoomIn">＋</button></div><div class="toolbar-right"><button class="preview-btn" id="previewBtn">▶ Önizle</button><button class="download-btn" id="downloadTopBtn">↓ İndir</button><button class="render-btn" id="renderBtn">Dışa aktar <span>↗</span></button></div></div>
+      <div class="editor-grid">
+        <aside class="assetbar">
+          <button class="active" data-tab="scenes"><span>▦</span>Sahneler</button><button data-tab="media"><span>▧</span>Medya</button><button data-tab="text"><span>T</span>Metin</button><button data-tab="captions"><span>CC</span>Altyazı</button><button data-tab="audio"><span>♫</span>Ses</button><button data-tab="style"><span>◈</span>Stil</button>
+        </aside>
+        <section class="scene-list"><div id="scenesPanel"><div class="scene-head"><b>SAHNELER</b><button id="addScene">＋</button></div><div id="sceneCards"></div></div><div class="media-panel" id="mediaPanel"><div class="scene-head"><b>STOK MEDYA</b><button id="closeMedia">×</button></div><form class="media-search" id="mediaSearch"><input id="mediaQuery" placeholder="Sahne için ara"><button>⌕</button></form><div id="mediaResults" class="media-results"><div class="media-empty">Bir konu arayarak sahneye stok görsel veya video ekle.</div></div><a class="pexels-credit" id="mediaCredit" href="https://commons.wikimedia.org" target="_blank" rel="noreferrer">Medya kaynağı sonuçlarla gösterilir</a></div></section>
+        <section class="canvas-area"><div class="canvas-top"><span id="canvasResolution">1080 × 1920</span><button>⌗ Güvenli alan</button></div><div class="video-canvas" id="videoCanvas"><div class="orb orb-a"></div><div class="orb orb-b"></div><div class="canvas-copy"><span>YENİ NESİL</span><h2 id="canvasTitle">Şehir seninle<br>yeniden ritim bulur.</h2><p id="canvasSubtitle">Her adım, daha canlı bir geleceğe.</p></div><div class="caption-preview" id="captionPreview">Her adım, daha canlı bir geleceğe.</div><div class="play-overlay" id="playOverlay">▶</div></div><div class="canvas-controls"><button id="canvasPlay">▶</button><span id="currentTime">00:00</span><div class="scrub"><i></i></div><span id="canvasDuration">00:30</span><button>◰</button><button>⌗</button></div></section>
+        <aside class="properties"><div class="prop-tabs"><button class="active">Görsel</button><button>Animasyon</button></div><label>Görsel istemi</label><textarea id="imagePrompt">Gün doğumunda modern İstanbul sokakları, hareket halinde genç insanlar, sinematik ışık</textarea><div class="prop-actions"><button>↻ Yeniden üret</button><button>▣ Değiştir</button></div><div class="caption-settings"><label>Altyazı <input id="captionEnabled" type="checkbox" checked></label><select id="captionLanguage"><option>Türkçe</option><option>İngilizce</option><option>Almanca</option><option>Otomatik algıla</option></select><label>Altyazı stili</label><div class="caption-styles"><button class="selected" data-caption-style="classic">Klasik</button><button data-caption-style="bold">Vurgu</button><button data-caption-style="minimal">Sade</button></div><label>Konum</label><select id="captionPosition"><option value="bottom">Alt</option><option value="middle">Orta</option><option value="top">Üst</option></select></div><button class="danger" id="deleteScene">Sahneyi sil</button></aside>
+      </div>
+      <section class="timeline"><div class="timeline-head"><div><button id="splitScene" onclick="splitSelected()">✂ Böl</button><button id="duplicateScene" onclick="duplicateSelected()">▣ Çoğalt</button><button id="speedScene" onclick="changeSelectedSpeed()">⏱ Hız <span>1×</span></button></div><span>Toplam süre: <b id="timelineDuration">00:30</b></span></div><div class="ruler" id="timelineRuler"><b></b><span>00:00</span><span>00:05</span><span>00:10</span><span>00:15</span><span>00:20</span><span>00:25</span><span id="rulerEnd">00:30</span></div><div class="tracks" id="timelineTracks"><div class="track-label"><span>▣</span><b>Görüntü</b><button>◉</button></div><div class="clips" id="videoClips"></div><div class="track-label"><span>♫</span><b>Seslendirme</b><button>◉</button></div><div class="audio-track"><div class="waveform"></div><span>Ela · Türkçe seslendirme</span></div><div class="playhead" id="timelinePlayhead"></div></div><small class="timeline-help">Klipleri sürükleyerek sırala · Cetvele tıklayarak oynatma noktasını değiştir</small></section>
+    </section>
+  </main>
+
+  <div class="modal" id="renderModal" aria-hidden="true"><div class="modal-card"><button class="close" id="closeModal">×</button><div class="render-icon" id="renderIcon">↗</div><h2 id="renderTitle">Render hazırlanıyor</h2><p id="renderMessage"><span id="renderDuration">30</span> saniyelik video sunucuda işlenecek.</p><div class="render-progress"><i id="renderProgressBar"></i></div><div class="render-stats"><span><small>FORMAT</small><b>MP4</b></span><span><small>ÇÖZÜNÜRLÜK</small><b id="renderResolution">1080 × 1920</b></span><span><small>İLERLEME</small><b id="renderProgress">0%</b></span></div><a class="primary download-link disabled" id="downloadBtn" href="#">Videoyu indir ↓</a><a class="subtitle-link disabled" id="subtitleDownload" href="#">SRT altyazıyı indir</a><small class="mock-note" id="renderNote">Videoluk render motoruna bağlanıyor.</small></div></div>
+  <div class="toast" id="toast"></div>
+  <script src="app.js?v=5"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+services:
+  videoluk:
+    build: .
+    container_name: videoluk
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - videoluk-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    environment:
+      VIDEOLUK_HOST: 0.0.0.0
+      VIDEOLUK_PORT: 8787
+      VIDEOLUK_DATA_DIR: /data
+      VIDEOLUK_LLM_URL: ${VIDEOLUK_LLM_URL:-}
+      VIDEOLUK_LLM_MODEL: ${VIDEOLUK_LLM_MODEL:-}
+      VIDEOLUK_LLM_API_KEY: ${VIDEOLUK_LLM_API_KEY:-}
+      VIDEOLUK_PEXELS_API_KEY: ${VIDEOLUK_PEXELS_API_KEY:-}
+
+volumes:
+  videoluk-data:

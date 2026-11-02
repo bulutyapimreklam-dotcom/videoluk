@@ -1,0 +1,5 @@
+.git
+.openai
+data
+*.pyc
+__pycache__
