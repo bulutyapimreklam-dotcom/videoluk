@@ -6,6 +6,16 @@ Videoluk; kullanıcıdan video türü, süre, yön, görsel kaynağı ve metin a
 
 Ana vaat: Türkiye odaklı, kolay kullanılan ve üretim maliyeti şeffaf bir yapay zekâ video stüdyosu.
 
+## Kurgu Beyni yaklaşımı
+
+Videoluk'un yaratıcı avantajı, kurgu kararlarını genel model zevkine bırakmamasıdır. Deneyimli medya profesyonelinin bilgisi üç katmanda korunur:
+
+1. **Kurgu DNA:** Ritim, plan süresi, kanca, dramatik yapı, zorunlu ve yasak tercihler gibi açık kurallar.
+2. **Onaylı örnek hafızası:** Kullanıcının timeline üzerinde yaptığı önce/sonra değişiklikleri ve değişikliğin gerekçesi.
+3. **Model katmanı:** Kurallar ve ilgili örnekler üretim bağlamına eklenir. Yeterli kaliteli veri biriktiğinde versiyonlanmış eğitim/evaluation veri seti hazırlanır; model hiçbir zaman tek başına yaratıcı otorite olmaz.
+
+Her otomatik sahne kararı `editingReason` alanıyla açıklanır. Böylece kullanıcı yalnızca sonucu değil, sistemin hangi kurgu prensibini uyguladığını da denetler.
+
 ## Marka sistemi
 
 - Ürün adı: Videoluk

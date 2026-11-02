@@ -36,6 +36,31 @@ class VideolukCoreTests(unittest.TestCase):
         self.assertIn("00:00:00,000 --> 00:00:02,000", srt)
         self.assertIn("00:00:02,000 --> 00:00:06,000", srt)
 
+    def test_editing_rules_are_bounded_and_applied(self):
+        rules = server.normalize_editing_rules({
+            "hookSeconds": 99,
+            "averageShotSeconds": 0.1,
+            "rhythm": "  Kontrollü ritim  ",
+            "required": ["İlk planda insan yüzü"],
+            "forbidden": ["Gereksiz glitch"],
+        })
+        self.assertEqual(10, rules["hookSeconds"])
+        self.assertEqual(0.8, rules["averageShotSeconds"])
+        profile = {"id": "test", "name": "Usta", "rules": rules}
+        original_brief = server.editing_brief
+        try:
+            server.editing_brief = lambda _profile: "test brief"
+            result = server.apply_editing_profile({
+                "duration": 30,
+                "scenes": [{"title": "Kanca"}, {"title": "Gelişme"}, {"title": "Final"}],
+            }, profile)
+        finally:
+            server.editing_brief = original_brief
+        self.assertEqual(10, result["scenes"][0]["duration"])
+        self.assertEqual(10, result["scenes"][1]["duration"])
+        self.assertIn("kanca önceliği", result["scenes"][0]["editingReason"])
+        self.assertEqual("Usta", result["editingProfile"]["name"])
+
     def test_incomplete_renders_are_resumed_after_restart(self):
         originals = {
             "DATA": server.DATA,

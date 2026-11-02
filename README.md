@@ -2,6 +2,18 @@
 
 Videoluk, metin ve sahnelerden kendi sunucusunda video oluşturan bağımsız video stüdyosudur. Bu depo ilk çalışan CPU tabanlı MVP çekirdeğini içerir.
 
+## Kurgu Beyni ve Kurgu DNA'sı
+
+Videoluk yalnızca genel bir yapay zekâ promptuyla kurgu üretmez. Kurgu Beyni katmanı, deneyimli kurgu yönetmeninin prensiplerini her üretimde zorunlu şartname olarak uygular:
+
+- Kanca süresi, ortalama plan uzunluğu, ritim dili ve anlatı yapısı
+- Zorunlu kurgu kararları ve asla yapılmayacak tercihler
+- Geçiş politikası ve sahne başına karar gerekçesi
+- Timeline üzerinde düzeltilen işlerin “önce / sonra / neden” kaydı
+- Seçili profile ait son düzeltmelerin yeni üretimlerde bağlam olarak kullanılması
+
+Arayüzde **Kurgu DNA'sı → Düzenle** bölümünden ana profil tanımlanır. Timeline düzenlendikten sonra düzeltmenin nedeni **Bu düzeltmeyi öğret** ile kaydedilir. Bu yaklaşım, kontrolsüz fine-tuning yerine önce açıklanabilir kural + örnek geri çağırma katmanı kurar; yeterli onaylı örnek biriktiğinde aynı kayıtlar daha sonra model eğitimi için veri setine dönüştürülebilir.
+
 ## Yerelde çalıştırma
 
 Gereksinimler: Python 3.11+ ve FFmpeg.
@@ -73,6 +85,9 @@ Seslendirme sunucuda üretilir. macOS geliştirme ortamında sistemdeki `say`, D
 
 - `GET /api/health`
 - `POST /api/scripts/generate`
+- `GET /api/editing-profiles`
+- `POST /api/editing-profiles`
+- `POST /api/editing-feedback`
 - `GET /api/media/search`
 - `POST /api/voices/generate`
 - `GET /api/voices/:id`

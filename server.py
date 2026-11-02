@@ -105,8 +105,43 @@ def initialize() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             );
+            CREATE TABLE IF NOT EXISTS editing_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                rules TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS editing_feedback (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                project_id TEXT,
+                note TEXT NOT NULL,
+                before_state TEXT,
+                after_state TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(profile_id) REFERENCES editing_profiles(id)
+            );
             """
         )
+        profile_count = connection.execute("SELECT COUNT(*) AS total FROM editing_profiles").fetchone()["total"]
+        if not profile_count:
+            timestamp = now()
+            rules = {
+                "hookSeconds": 3,
+                "averageShotSeconds": 3.5,
+                "rhythm": "Kontrollü dinamik",
+                "narrativeStructure": "Kanca → merak → kanıt → duygu → net kapanış",
+                "transitionPolicy": "Geçiş efektini yalnızca anlatı gerektiriyorsa kullan",
+                "required": [],
+                "forbidden": [],
+            }
+            connection.execute(
+                "INSERT INTO editing_profiles VALUES (?, ?, ?, ?, ?, ?)",
+                ("default", "Benim Kurgu DNA'm", "Kendi kurgu prensiplerinle doldurulacak ana profil.",
+                 json.dumps(rules, ensure_ascii=False), timestamp, timestamp),
+            )
 
 
 def update_job(job_id: str, **values: object) -> None:
@@ -165,6 +200,88 @@ def validate_script_request(payload: dict) -> tuple[str, int, str, str]:
     return idea, duration, video_type, tone
 
 
+def normalize_editing_rules(rules: object) -> dict:
+    if not isinstance(rules, dict):
+        raise ValueError("Kurgu kuralları nesne biçiminde olmalı")
+    required = [" ".join(str(item).split())[:240] for item in rules.get("required", []) if str(item).strip()][:20]
+    forbidden = [" ".join(str(item).split())[:240] for item in rules.get("forbidden", []) if str(item).strip()][:20]
+    return {
+        "hookSeconds": max(1, min(10, float(rules.get("hookSeconds", 3)))),
+        "averageShotSeconds": max(0.8, min(15, float(rules.get("averageShotSeconds", 3.5)))),
+        "rhythm": " ".join(str(rules.get("rhythm") or "Kontrollü").split())[:120],
+        "narrativeStructure": " ".join(str(rules.get("narrativeStructure") or "Kanca → gelişme → kapanış").split())[:300],
+        "transitionPolicy": " ".join(str(rules.get("transitionPolicy") or "Anlatı gerektirmedikçe efekt kullanma").split())[:300],
+        "required": required,
+        "forbidden": forbidden,
+    }
+
+
+def get_editing_profile(profile_id: str | None) -> dict | None:
+    try:
+        with db() as connection:
+            row = connection.execute(
+                "SELECT * FROM editing_profiles WHERE id = ?", (profile_id or "default",)
+            ).fetchone()
+            if not row:
+                row = connection.execute("SELECT * FROM editing_profiles ORDER BY created_at ASC LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    result = dict(row)
+    result["rules"] = json.loads(result["rules"])
+    return result
+
+
+def editing_training_context(profile_id: str, limit: int = 5) -> list[dict]:
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT note, after_state FROM editing_feedback WHERE profile_id = ? "
+            "ORDER BY created_at DESC LIMIT ?", (profile_id, limit),
+        ).fetchall()
+    return [{"note": row["note"], "approvedResult": json.loads(row["after_state"]) if row["after_state"] else None} for row in rows]
+
+
+def editing_brief(profile: dict | None) -> str:
+    if not profile:
+        return ""
+    rules = profile["rules"]
+    required = "; ".join(rules.get("required") or []) or "Henüz tanımlanmadı"
+    forbidden = "; ".join(rules.get("forbidden") or []) or "Henüz tanımlanmadı"
+    examples = editing_training_context(profile["id"])
+    example_notes = " | ".join(item["note"] for item in examples) or "Henüz düzeltme örneği yok"
+    return (
+        f"Kurgu DNA profili: {profile['name']}. Ritim: {rules['rhythm']}. "
+        f"İlk kanca: en geç {rules['hookSeconds']} saniye. Ortalama plan: {rules['averageShotSeconds']} saniye. "
+        f"Anlatı yapısı: {rules['narrativeStructure']}. Geçiş politikası: {rules['transitionPolicy']}. "
+        f"Zorunlu kararlar: {required}. Yasak kararlar: {forbidden}. "
+        f"Ustanın son düzeltme notları: {example_notes}."
+    )
+
+
+def apply_editing_profile(result: dict, profile: dict | None) -> dict:
+    if not profile:
+        return result
+    scenes = result.get("scenes") or []
+    if not scenes:
+        return result
+    rules = profile["rules"]
+    total = float(result.get("duration") or 30)
+    hook = min(float(rules["hookSeconds"]), total / max(1, len(scenes)))
+    remaining = max(0.25, total - hook)
+    regular = remaining / max(1, len(scenes) - 1)
+    for index, scene in enumerate(scenes):
+        scene["duration"] = round(hook if index == 0 else regular, 2)
+        scene["transition"] = rules["transitionPolicy"]
+        scene["editingReason"] = (
+            f"{rules['rhythm']} ritim için {scene['duration']:.1f} sn; "
+            + ("kanca önceliği" if index == 0 else "anlatı akışını koruyan plan süresi")
+        )
+    result["editingProfile"] = {"id": profile["id"], "name": profile["name"]}
+    result["editingBrief"] = editing_brief(profile)
+    return result
+
+
 def generate_local_script(payload: dict) -> dict:
     idea, duration, video_type, tone = validate_script_request(payload)
     tone_openers = {
@@ -187,7 +304,7 @@ def generate_local_script(payload: dict) -> dict:
         for i, (title, subtitle) in enumerate(scene_templates)
     ]
     script = "\n\n".join(f"{scene['title']} {scene['subtitle']}" for scene in scenes)
-    return {
+    result = {
         "idea": idea,
         "type": video_type,
         "tone": tone,
@@ -196,6 +313,7 @@ def generate_local_script(payload: dict) -> dict:
         "scenes": scenes,
         "provider": "local",
     }
+    return apply_editing_profile(result, get_editing_profile(str(payload.get("profileId") or "default")))
 
 
 def biography_subject(idea: str) -> str | None:
@@ -256,11 +374,12 @@ def generate_biography_script(payload: dict, subject: str) -> dict:
             "mediaQuery": article["title"],
         })
     script = "\n\n".join(scene["subtitle"] for scene in scenes)
-    return {
+    result = {
         "idea": idea, "type": video_type, "tone": tone, "duration": duration,
         "script": script, "scenes": scenes, "provider": "wikipedia",
         "source": {"title": article["title"], "url": article["url"]},
     }
+    return apply_editing_profile(result, get_editing_profile(str(payload.get("profileId") or "default")))
 
 
 def llm_endpoint() -> str:
@@ -282,6 +401,7 @@ def extract_json(text: str) -> dict:
 
 def generate_ai_script(payload: dict) -> dict:
     idea, duration, video_type, tone = validate_script_request(payload)
+    profile = get_editing_profile(str(payload.get("profileId") or "default"))
     if not LLM_URL or not LLM_MODEL:
         subject = biography_subject(idea)
         if subject:
@@ -294,11 +414,14 @@ def generate_ai_script(payload: dict) -> dict:
     system_prompt = (
         "Sen Videoluk adlı Türkçe video üretim platformunun kıdemli senaryo yazarısın. "
         "Kısa, doğal, klişeden uzak ve seslendirmeye uygun Türkçe yaz. Yalnızca geçerli JSON döndür. "
+        "Kurgu yönetmeninin kurallarını yaratıcı öneri değil, zorunlu yapım şartı olarak uygula. "
         "Şema: {\"script\":\"tam metin\",\"scenes\":[{\"title\":\"kısa başlık\","
-        "\"subtitle\":\"1-2 cümle seslendirme\",\"purpose\":\"Kanca|Ana fikir|Kapanış\"}]}"
+        "\"subtitle\":\"1-2 cümle seslendirme\",\"purpose\":\"Kanca|Ana fikir|Kapanış\","
+        "\"editingReason\":\"kurgu kararının kısa gerekçesi\"}]}"
     )
     user_prompt = (
         f"Fikir: {idea}\nVideo türü: {video_type}\nTon: {tone}\nSüre: {duration} saniye\n"
+        f"Kurgu yönetmeni şartnamesi: {editing_brief(profile)}\n"
         f"Tam olarak {scene_count} sahne oluştur. Son sahne net ama abartısız bir çağrı içersin."
     )
     request_body = {
@@ -334,10 +457,15 @@ def generate_ai_script(payload: dict) -> dict:
             title = str(scene.get("title") or f"Sahne {index + 1}").strip()[:180]
             subtitle = str(scene.get("subtitle") or "").strip()[:500]
             purpose = str(scene.get("purpose") or ("Kapanış" if index == len(scenes) - 1 else "Ana fikir"))[:40]
-            normalized_scenes.append({"title": title, "subtitle": subtitle, "purpose": purpose})
+            normalized_scenes.append({
+                "title": title,
+                "subtitle": subtitle,
+                "purpose": purpose,
+                "editingReason": str(scene.get("editingReason") or "Kurgu DNA akışına uygun sahne")[:300],
+            })
         if len(normalized_scenes) < 2:
             raise ValueError("Model yeterli sahne oluşturmadı")
-        return {
+        result = {
             "idea": idea,
             "type": video_type,
             "tone": tone,
@@ -347,6 +475,7 @@ def generate_ai_script(payload: dict) -> dict:
             "provider": "ai",
             "model": LLM_MODEL,
         }
+        return apply_editing_profile(result, profile)
     except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError) as exc:
         fallback = generate_local_script(payload)
         fallback["provider"] = "local-fallback"
@@ -708,6 +837,49 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             if route == "/api/scripts/generate":
                 self.send_json(HTTPStatus.OK, generate_ai_script(body))
                 return
+            if route == "/api/editing-profiles":
+                profile_id = str(body.get("id") or uuid.uuid4())
+                if not profile_id.replace("-", "").isalnum():
+                    raise ValueError("Geçersiz Kurgu DNA kimliği")
+                name = " ".join(str(body.get("name") or "").split()).strip()[:120]
+                description = " ".join(str(body.get("description") or "").split()).strip()[:600]
+                if len(name) < 3:
+                    raise ValueError("Kurgu DNA profili için bir ad yaz")
+                rules = normalize_editing_rules(body.get("rules") or {})
+                timestamp = now()
+                with DB_LOCK, db() as connection:
+                    exists = connection.execute("SELECT id FROM editing_profiles WHERE id = ?", (profile_id,)).fetchone()
+                    if exists:
+                        connection.execute(
+                            "UPDATE editing_profiles SET name = ?, description = ?, rules = ?, updated_at = ? WHERE id = ?",
+                            (name, description, json.dumps(rules, ensure_ascii=False), timestamp, profile_id),
+                        )
+                    else:
+                        connection.execute(
+                            "INSERT INTO editing_profiles VALUES (?, ?, ?, ?, ?, ?)",
+                            (profile_id, name, description, json.dumps(rules, ensure_ascii=False), timestamp, timestamp),
+                        )
+                self.send_json(HTTPStatus.OK if exists else HTTPStatus.CREATED, get_editing_profile(profile_id))
+                return
+            if route == "/api/editing-feedback":
+                profile_id = str(body.get("profileId") or "default")
+                if not get_editing_profile(profile_id):
+                    self.send_json(HTTPStatus.NOT_FOUND, {"error": "Kurgu DNA profili bulunamadı"})
+                    return
+                note = " ".join(str(body.get("note") or "").split()).strip()[:1000]
+                if len(note) < 5:
+                    raise ValueError("Öğrenme kaydı için düzeltmenin nedenini yaz")
+                feedback_id = str(uuid.uuid4())
+                with DB_LOCK, db() as connection:
+                    connection.execute(
+                        "INSERT INTO editing_feedback VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (feedback_id, profile_id, str(body.get("projectId") or "") or None, note,
+                         json.dumps(body.get("before"), ensure_ascii=False) if body.get("before") is not None else None,
+                         json.dumps(body.get("after"), ensure_ascii=False) if body.get("after") is not None else None,
+                         now()),
+                    )
+                self.send_json(HTTPStatus.CREATED, {"id": feedback_id, "profileId": profile_id, "learned": True})
+                return
             if route == "/api/voices/generate":
                 self.send_json(HTTPStatus.CREATED, generate_voice(str(body.get("text") or "")))
                 return
@@ -765,6 +937,17 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "stockProvider": "pexels" if PEXELS_API_KEY else None,
                 "voiceEngine": "system-tts" if shutil.which("say") or shutil.which("espeak-ng") else None,
             })
+            return
+        if route == "/api/editing-profiles":
+            with db() as connection:
+                rows = connection.execute("SELECT * FROM editing_profiles ORDER BY updated_at DESC").fetchall()
+            profiles = []
+            for row in rows:
+                profile = dict(row)
+                profile["rules"] = json.loads(profile["rules"])
+                profile["feedbackCount"] = len(editing_training_context(profile["id"], 100))
+                profiles.append(profile)
+            self.send_json(HTTPStatus.OK, {"profiles": profiles})
             return
         if route == "/api/media/search":
             params = parse_qs(urlparse(self.path).query)
