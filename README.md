@@ -11,8 +11,9 @@ Videoluk yalnızca genel bir yapay zekâ promptuyla kurgu üretmez. Kurgu Beyni 
 - Geçiş politikası ve sahne başına karar gerekçesi
 - Timeline üzerinde düzeltilen işlerin “önce / sonra / neden” kaydı
 - Seçili profile ait son düzeltmelerin yeni üretimlerde bağlam olarak kullanılması
+- Toplu referans video yükleme, FFmpeg ile kesme/plan ritmi analizi ve editör onaylı profil güncellemesi
 
-Arayüzde **Kurgu DNA'sı → Düzenle** bölümünden ana profil tanımlanır. Timeline düzenlendikten sonra düzeltmenin nedeni **Bu düzeltmeyi öğret** ile kaydedilir. Bu yaklaşım, kontrolsüz fine-tuning yerine önce açıklanabilir kural + örnek geri çağırma katmanı kurar; yeterli onaylı örnek biriktiğinde aynı kayıtlar daha sonra model eğitimi için veri setine dönüştürülebilir.
+Arayüzde **Kurgu DNA'sı → Düzenle** bölümünden ana profil tanımlanır. Aynı ekrandan MP4, MOV, M4V, WEBM veya MKV referanslar topluca yüklenebilir. Analiz motoru videoları sırayla işler; süre, yön, ses varlığı, kesme noktaları ve ortalama plan süresini çıkarır. Ölçümler editör onayı olmadan profile yazılmaz; **Analizi Kurgu DNA'ya uygula** ile onaylandığında ritim kuralına dönüşür. Timeline düzenlendikten sonra düzeltmenin nedeni **Bu düzeltmeyi öğret** ile ayrıca kaydedilebilir.
 
 ## Yerelde çalıştırma
 
@@ -88,6 +89,9 @@ Seslendirme sunucuda üretilir. macOS geliştirme ortamında sistemdeki `say`, D
 - `GET /api/editing-profiles`
 - `POST /api/editing-profiles`
 - `POST /api/editing-feedback`
+- `GET /api/training-videos?profileId=:id`
+- `POST /api/training-videos?profileId=:id`
+- `POST /api/training/apply`
 - `GET /api/media/search`
 - `POST /api/voices/generate`
 - `GET /api/voices/:id`
@@ -102,7 +106,7 @@ Render işleri arka planda FFmpeg ile yürütülür. Dikey, yatay ve kare 1080p 
 ## Beta güvenlik sınırları
 
 - API yalnızca aynı origin üzerinden erişime açıktır; ayrı bir web alanı kullanılacaksa `VIDEOLUK_ALLOWED_ORIGIN` açıkça tanımlanır.
-- İstek gövdeleri 1 MB ile, stok medya indirmeleri 200 MB ile sınırlandırılır.
+- JSON istek gövdeleri 1 MB, stok medya indirmeleri 200 MB, eğitim videosu başına yükleme varsayılan olarak 2 GB ile sınırlandırılır.
 - Üretim trafiği Caddy HTTPS ve Basic Auth katmanından geçer.
 - Render paralelliği ve kuyruk uzunluğu ortam değişkenleriyle sınırlıdır.
 - API yanıtları önbelleğe alınmaz; iframe, kamera, mikrofon ve konum erişimi güvenlik başlıklarıyla kapatılır.

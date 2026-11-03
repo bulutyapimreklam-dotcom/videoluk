@@ -106,6 +106,42 @@ class VideolukCoreTests(unittest.TestCase):
             for name, value in originals.items():
                 setattr(server, name, value)
 
+    def test_training_summary_calculates_editing_rhythm(self):
+        originals = {
+            "DATA": server.DATA,
+            "OUTPUTS": server.OUTPUTS,
+            "VOICES": server.VOICES,
+            "MEDIA_CACHE": server.MEDIA_CACHE,
+            "TRAINING_VIDEOS": server.TRAINING_VIDEOS,
+            "DB_PATH": server.DB_PATH,
+        }
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root
+                server.OUTPUTS = root / "renders"
+                server.VOICES = root / "voices"
+                server.MEDIA_CACHE = root / "media-cache"
+                server.TRAINING_VIDEOS = root / "training-videos"
+                server.DB_PATH = root / "videoluk.db"
+                server.initialize()
+                stamp = server.now()
+                with server.db() as connection:
+                    for index, shot in enumerate((2.0, 4.0), 1):
+                        connection.execute(
+                            "INSERT INTO training_videos "
+                            "(id, profile_id, filename, file_path, status, progress, duration, cut_count, average_shot, has_audio, created_at, updated_at) "
+                            "VALUES (?, 'default', ?, ?, 'ready', 100, 30, 9, ?, 1, ?, ?)",
+                            (f"video-{index}", f"video-{index}.mp4", f"/tmp/video-{index}.mp4", shot, stamp, stamp),
+                        )
+                summary = server.training_summary("default")
+                self.assertEqual(2, summary["ready"])
+                self.assertEqual(3.0, summary["suggestedAverageShotSeconds"])
+                self.assertEqual(60.0, summary["totalDurationSeconds"])
+        finally:
+            for name, value in originals.items():
+                setattr(server, name, value)
+
 
 if __name__ == "__main__":
     unittest.main()

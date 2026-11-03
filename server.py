@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -34,8 +34,10 @@ DATA = Path(os.getenv("VIDEOLUK_DATA_DIR", ROOT / "data"))
 OUTPUTS = DATA / "renders"
 VOICES = DATA / "voices"
 MEDIA_CACHE = DATA / "media-cache"
+TRAINING_VIDEOS = DATA / "training-videos"
 DB_PATH = DATA / "videoluk.db"
 FFMPEG = os.getenv("FFMPEG_BIN", "ffmpeg")
+FFPROBE = os.getenv("FFPROBE_BIN", "ffprobe")
 HOST = os.getenv("VIDEOLUK_HOST", "127.0.0.1")
 PORT = int(os.getenv("VIDEOLUK_PORT", "8787"))
 LLM_URL = os.getenv("VIDEOLUK_LLM_URL", "").rstrip("/")
@@ -44,11 +46,13 @@ LLM_API_KEY = os.getenv("VIDEOLUK_LLM_API_KEY", "")
 LLM_TIMEOUT = int(os.getenv("VIDEOLUK_LLM_TIMEOUT", "60"))
 PEXELS_API_KEY = os.getenv("VIDEOLUK_PEXELS_API_KEY", "")
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
+MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
 RENDER_WORKERS = max(1, min(4, int(os.getenv("VIDEOLUK_RENDER_WORKERS", "1"))))
 MAX_QUEUED_RENDERS = max(1, int(os.getenv("VIDEOLUK_MAX_QUEUED_RENDERS", "8")))
 ALLOWED_ORIGIN = os.getenv("VIDEOLUK_ALLOWED_ORIGIN", "").rstrip("/")
 DB_LOCK = threading.Lock()
 RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=RENDER_WORKERS, thread_name_prefix="videoluk-render")
+ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videoluk-analysis")
 
 
 def ffmpeg_has_filter(filter_name: str) -> bool:
@@ -83,6 +87,7 @@ def initialize() -> None:
     OUTPUTS.mkdir(parents=True, exist_ok=True)
     VOICES.mkdir(parents=True, exist_ok=True)
     MEDIA_CACHE.mkdir(parents=True, exist_ok=True)
+    TRAINING_VIDEOS.mkdir(parents=True, exist_ok=True)
     with db() as connection:
         connection.executescript(
             """
@@ -123,6 +128,23 @@ def initialize() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(profile_id) REFERENCES editing_profiles(id)
             );
+            CREATE TABLE IF NOT EXISTS training_videos (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress INTEGER NOT NULL DEFAULT 0,
+                duration REAL,
+                cut_count INTEGER,
+                average_shot REAL,
+                has_audio INTEGER,
+                report TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(profile_id) REFERENCES editing_profiles(id)
+            );
             """
         )
         profile_count = connection.execute("SELECT COUNT(*) AS total FROM editing_profiles").fetchone()["total"]
@@ -142,6 +164,103 @@ def initialize() -> None:
                 ("default", "Benim Kurgu DNA'm", "Kendi kurgu prensiplerinle doldurulacak ana profil.",
                  json.dumps(rules, ensure_ascii=False), timestamp, timestamp),
             )
+
+
+def update_training_video(video_id: str, **values: object) -> None:
+    values["updated_at"] = now()
+    columns = ", ".join(f"{key} = ?" for key in values)
+    with DB_LOCK, db() as connection:
+        connection.execute(
+            f"UPDATE training_videos SET {columns} WHERE id = ?",
+            [*values.values(), video_id],
+        )
+
+
+def probe_training_video(path: Path) -> dict:
+    probe = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height,r_frame_rate", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    if probe.returncode != 0:
+        raise ValueError("Video bilgileri okunamadı")
+    data = json.loads(probe.stdout or "{}")
+    duration = float((data.get("format") or {}).get("duration") or 0)
+    if duration <= 0:
+        raise ValueError("Video süresi belirlenemedi")
+    streams = data.get("streams") or []
+    video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
+    return {
+        "duration": duration,
+        "width": int(video_stream.get("width") or 0),
+        "height": int(video_stream.get("height") or 0),
+        "hasAudio": any(stream.get("codec_type") == "audio" for stream in streams),
+    }
+
+
+def detect_scene_cuts(path: Path) -> list[float]:
+    result = subprocess.run(
+        [FFMPEG, "-hide_banner", "-i", str(path), "-vf", "select='gt(scene,0.32)',showinfo", "-an", "-f", "null", "-"],
+        capture_output=True, text=True, timeout=1800,
+    )
+    combined = f"{result.stdout}\n{result.stderr}"
+    return [float(value) for value in re.findall(r"pts_time:([0-9]+(?:\.[0-9]+)?)", combined)]
+
+
+def analyze_training_video(video_id: str, path: Path) -> None:
+    try:
+        update_training_video(video_id, status="analyzing", progress=10, error=None)
+        technical = probe_training_video(path)
+        update_training_video(video_id, progress=35)
+        cuts = detect_scene_cuts(path)
+        duration = technical["duration"]
+        shot_count = max(1, len(cuts) + 1)
+        average_shot = round(duration / shot_count, 2)
+        orientation = "dikey" if technical["height"] > technical["width"] else "yatay" if technical["width"] > technical["height"] else "kare"
+        report = {
+            **technical,
+            "orientation": orientation,
+            "cutTimes": cuts[:5000],
+            "cutCount": len(cuts),
+            "shotCount": shot_count,
+            "averageShotSeconds": average_shot,
+        }
+        update_training_video(
+            video_id, status="ready", progress=100, duration=duration,
+            cut_count=len(cuts), average_shot=average_shot,
+            has_audio=1 if technical["hasAudio"] else 0,
+            report=json.dumps(report, ensure_ascii=False),
+        )
+    except Exception as exc:
+        update_training_video(video_id, status="failed", progress=0, error=str(exc)[:1000])
+
+
+def training_summary(profile_id: str) -> dict:
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT * FROM training_videos WHERE profile_id = ? ORDER BY created_at DESC", (profile_id,)
+        ).fetchall()
+    items = []
+    ready_shots = []
+    total_duration = 0.0
+    for row in rows:
+        item = dict(row)
+        item.pop("file_path", None)
+        item["report"] = json.loads(item["report"]) if item["report"] else None
+        items.append(item)
+        if row["status"] == "ready" and row["average_shot"]:
+            ready_shots.append(float(row["average_shot"]))
+            total_duration += float(row["duration"] or 0)
+    analyzed_average = round(sum(ready_shots) / len(ready_shots), 2) if ready_shots else None
+    return {
+        "profileId": profile_id,
+        "total": len(rows),
+        "ready": sum(1 for row in rows if row["status"] == "ready"),
+        "processing": sum(1 for row in rows if row["status"] in {"queued", "analyzing"}),
+        "failed": sum(1 for row in rows if row["status"] == "failed"),
+        "totalDurationSeconds": round(total_duration, 1),
+        "suggestedAverageShotSeconds": analyzed_average,
+        "videos": items,
+    }
 
 
 def update_job(job_id: str, **values: object) -> None:
@@ -783,7 +902,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         origin = self.headers.get("Origin", "").rstrip("/")
         if ALLOWED_ORIGIN and origin == ALLOWED_ORIGIN:
             self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Video-Name")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Vary", "Origin")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -830,9 +949,52 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             while chunk := source.read(1024 * 1024):
                 self.wfile.write(chunk)
 
+    def receive_training_video(self, profile_id: str) -> None:
+        profile = get_editing_profile(profile_id)
+        if not profile:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "Kurgu DNA profili bulunamadı"})
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > MAX_TRAINING_VIDEO_BYTES:
+            raise ValueError("Video boş veya yükleme sınırını aşıyor")
+        original_name = unquote(self.headers.get("X-Video-Name", "egitim-videosu.mp4"))
+        original_name = " ".join(original_name.split())[:180]
+        suffix = Path(original_name).suffix.lower()
+        if suffix not in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}:
+            raise ValueError("Desteklenen video türleri: MP4, MOV, M4V, WEBM ve MKV")
+        video_id = str(uuid.uuid4())
+        target_dir = TRAINING_VIDEOS / profile_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"{video_id}{suffix}"
+        remaining = length
+        try:
+            with target.open("wb") as output:
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("Video yüklemesi yarıda kesildi")
+                    output.write(chunk)
+                    remaining -= len(chunk)
+            timestamp = now()
+            with DB_LOCK, db() as connection:
+                connection.execute(
+                    "INSERT INTO training_videos (id, profile_id, filename, file_path, status, progress, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 'queued', 0, ?, ?)",
+                    (video_id, profile_id, original_name, str(target), timestamp, timestamp),
+                )
+            ANALYSIS_EXECUTOR.submit(analyze_training_video, video_id, target)
+            self.send_json(HTTPStatus.ACCEPTED, {"id": video_id, "filename": original_name, "status": "queued"})
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+
     def do_POST(self) -> None:
         try:
             route = urlparse(self.path).path
+            if route == "/api/training-videos":
+                params = parse_qs(urlparse(self.path).query)
+                self.receive_training_video(params.get("profileId", ["default"])[0])
+                return
             body = self.read_json()
             if route == "/api/scripts/generate":
                 self.send_json(HTTPStatus.OK, generate_ai_script(body))
@@ -879,6 +1041,25 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                          now()),
                     )
                 self.send_json(HTTPStatus.CREATED, {"id": feedback_id, "profileId": profile_id, "learned": True})
+                return
+            if route == "/api/training/apply":
+                profile_id = str(body.get("profileId") or "default")
+                profile = get_editing_profile(profile_id)
+                summary = training_summary(profile_id)
+                suggested = summary.get("suggestedAverageShotSeconds")
+                if not profile or not suggested:
+                    raise ValueError("Kurgu DNA'ya uygulanacak tamamlanmış video analizi yok")
+                rules = dict(profile["rules"])
+                rules["averageShotSeconds"] = suggested
+                learned_rule = f"Referans videolardaki yaklaşık {suggested:g} saniyelik ortalama plan ritmini koru"
+                required = [rule for rule in rules.get("required", []) if not rule.startswith("Referans videolardaki yaklaşık ")]
+                rules["required"] = [learned_rule, *required][:20]
+                with DB_LOCK, db() as connection:
+                    connection.execute(
+                        "UPDATE editing_profiles SET rules = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(normalize_editing_rules(rules), ensure_ascii=False), now(), profile_id),
+                    )
+                self.send_json(HTTPStatus.OK, {"profile": get_editing_profile(profile_id), "summary": summary})
                 return
             if route == "/api/voices/generate":
                 self.send_json(HTTPStatus.CREATED, generate_voice(str(body.get("text") or "")))
@@ -949,6 +1130,14 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 profiles.append(profile)
             self.send_json(HTTPStatus.OK, {"profiles": profiles})
             return
+        if route == "/api/training-videos":
+            params = parse_qs(urlparse(self.path).query)
+            profile_id = params.get("profileId", ["default"])[0]
+            if not get_editing_profile(profile_id):
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": "Kurgu DNA profili bulunamadı"})
+                return
+            self.send_json(HTTPStatus.OK, training_summary(profile_id))
+            return
         if route == "/api/media/search":
             params = parse_qs(urlparse(self.path).query)
             query = params.get("q", [""])[0]
@@ -1009,3 +1198,4 @@ if __name__ == "__main__":
     finally:
         server.server_close()
         RENDER_EXECUTOR.shutdown(wait=False, cancel_futures=False)
+        ANALYSIS_EXECUTOR.shutdown(wait=False, cancel_futures=False)
