@@ -126,6 +126,8 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/admin/overview` (yalnızca `owner` rolü)
+- `POST /api/admin/users` (yalnızca `owner` rolü)
+- `POST /api/admin/users/:id/update` (yalnızca `owner` rolü)
 - `POST /api/scripts/generate`
 - `GET /api/editing-profiles`
 - `POST /api/editing-profiles`
@@ -159,6 +161,8 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `GET /api/renders/:id/subtitles`
 
 Owner hesabı proje kütüphanesindeki **Yönetim** düğmesinden toplam kullanıcı, proje, depolama, render ve tahsilat özetini; son kullanıcıları, işleri ve ödemeleri görebilir. Yönetim API'si normal kullanıcılar için `403` döndürür ve parola, oturum ya da ödeme tokenı paylaşmaz.
+
+Owner aynı ekrandan yeni üye hesabı oluşturabilir, kredi ekleyip çıkarabilir, kullanıcıya özel proje/depolama/aylık render kotası tanımlayabilir ve hesabı pasifleştirebilir. Pasifleştirilen hesabın açık oturumları anında kapatılır; yönetici kendi hesabını pasifleştiremez ve kredi bakiyesi sıfırın altına indirilemez.
 
 Yönetim ekranı ayrıca render kuyruğunu, disk doluluk oranını, son 24 saatteki render/ödeme/sistem hatalarını ve son sistem olaylarını gösterir. Beklenmeyen API ve render hataları SQLite içindeki sınırlı olay günlüğüne kaydedilir; yalnızca owner hesabına gösterilir. `/api/health` ayrıntı sızdırmadan `ok` veya `degraded` durumu ile kuyruk sayısını döndürür.
 

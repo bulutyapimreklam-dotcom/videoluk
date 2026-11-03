@@ -202,6 +202,14 @@ def initialize() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
+            CREATE TABLE IF NOT EXISTS user_limits (
+                user_id TEXT PRIMARY KEY,
+                project_limit INTEGER NOT NULL,
+                storage_limit_bytes INTEGER NOT NULL,
+                monthly_render_limit INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             CREATE TABLE IF NOT EXISTS media_assets (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -264,11 +272,14 @@ def initialize() -> None:
         if "user_id" not in project_columns:
             connection.execute("ALTER TABLE projects ADD COLUMN user_id TEXT")
         connection.execute("UPDATE projects SET user_id = ? WHERE user_id IS NULL OR user_id = ''", (LOCAL_USER_ID,))
+        user_columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+        if "status" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
         local_user = connection.execute("SELECT id FROM users WHERE id = ?", (LOCAL_USER_ID,)).fetchone()
         if not local_user:
             timestamp = now()
             connection.execute(
-                "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
                 (LOCAL_USER_ID, "local@videoluk.internal", "Yerel Kullanıcı", "disabled", "owner", timestamp, timestamp),
             )
         if ADMIN_EMAIL and ADMIN_PASSWORD:
@@ -276,7 +287,7 @@ def initialize() -> None:
             if not existing_admin:
                 timestamp = now()
                 connection.execute(
-                    "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
                     (str(uuid.uuid4()), ADMIN_EMAIL, "Videoluk Yöneticisi", hash_password(ADMIN_PASSWORD), "owner", timestamp, timestamp),
                 )
         for user_row in connection.execute("SELECT id FROM users").fetchall():
@@ -465,7 +476,18 @@ def month_start() -> str:
     return current.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
+def limits_for_user(user_id: str) -> dict:
+    with db() as connection:
+        row = connection.execute("SELECT * FROM user_limits WHERE user_id = ?", (user_id,)).fetchone()
+    return {
+        "projects": int(row["project_limit"]) if row else MAX_PROJECTS_PER_USER,
+        "storageBytes": int(row["storage_limit_bytes"]) if row else MAX_STORAGE_BYTES_PER_USER,
+        "monthlyRenders": int(row["monthly_render_limit"]) if row else MAX_MONTHLY_RENDERS_PER_USER,
+    }
+
+
 def user_usage(user_id: str) -> dict:
+    limits = limits_for_user(user_id)
     with db() as connection:
         projects = int(connection.execute("SELECT COUNT(*) AS total FROM projects WHERE user_id = ?", (user_id,)).fetchone()["total"])
         storage = int(connection.execute("SELECT COALESCE(SUM(size_bytes), 0) AS total FROM media_assets WHERE user_id = ?", (user_id,)).fetchone()["total"])
@@ -480,13 +502,77 @@ def user_usage(user_id: str) -> dict:
         ).fetchone()["total"])
         credits = int(connection.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM credit_transactions WHERE user_id = ?", (user_id,)).fetchone()["total"])
     return {
-        "projects": {"used": projects, "limit": MAX_PROJECTS_PER_USER},
-        "storage": {"usedBytes": storage, "limitBytes": MAX_STORAGE_BYTES_PER_USER},
-        "renders": {"used": renders, "limit": MAX_MONTHLY_RENDERS_PER_USER},
+        "projects": {"used": projects, "limit": limits["projects"]},
+        "storage": {"usedBytes": storage, "limitBytes": limits["storageBytes"]},
+        "renders": {"used": renders, "limit": limits["monthlyRenders"]},
         "renderedSeconds": round(rendered_seconds, 1),
         "credits": credits,
         "periodStartsAt": month_start(),
     }
+
+
+def create_managed_user(payload: dict) -> dict:
+    email = str(payload.get("email") or "").strip().lower()[:254]
+    name = " ".join(str(payload.get("name") or "").split())[:120]
+    password = str(payload.get("password") or "")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError("Geçerli bir e-posta adresi gerekli")
+    if len(name) < 2:
+        raise ValueError("Kullanıcı adı en az 2 karakter olmalı")
+    if len(password) < 10:
+        raise ValueError("Geçici parola en az 10 karakter olmalı")
+    timestamp = now()
+    user_id = str(uuid.uuid4())
+    with DB_LOCK, db() as connection:
+        if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
+            raise ValueError("Bu e-posta adresi zaten kayıtlı")
+        connection.execute(
+            "INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at, status) VALUES (?, ?, ?, ?, 'member', ?, ?, 'active')",
+            (user_id, email, name, hash_password(password), timestamp, timestamp),
+        )
+        if STARTER_CREDITS:
+            connection.execute(
+                "INSERT INTO credit_transactions VALUES (?, ?, ?, 'starter', 'Başlangıç kredisi', '{}', ?)",
+                (str(uuid.uuid4()), user_id, STARTER_CREDITS, timestamp),
+            )
+    return {"id": user_id, "email": email, "name": name, "role": "member", "status": "active"}
+
+
+def update_managed_user(user_id: str, payload: dict, actor_id: str) -> dict:
+    with DB_LOCK, db() as connection:
+        row = connection.execute("SELECT id, email, name, role, status FROM users WHERE id = ? AND password_hash != 'disabled'", (user_id,)).fetchone()
+        if not row:
+            raise ValueError("Kullanıcı bulunamadı")
+        status = str(payload.get("status") or row["status"])
+        if status not in {"active", "suspended"}:
+            raise ValueError("Geçersiz hesap durumu")
+        if user_id == actor_id and status != "active":
+            raise ValueError("Kendi yönetici hesabınızı pasifleştiremezsiniz")
+        current_limits = limits_for_user(user_id)
+        projects = max(1, min(1000, int(payload.get("projectLimit", current_limits["projects"]))))
+        storage_gb = max(1, min(1000, int(payload.get("storageLimitGb", math.ceil(current_limits["storageBytes"] / 1024**3)))))
+        renders = max(1, min(10000, int(payload.get("monthlyRenderLimit", current_limits["monthlyRenders"]))))
+        adjustment = int(payload.get("creditAdjustment") or 0)
+        if abs(adjustment) > 100_000:
+            raise ValueError("Tek işlemde en fazla 100.000 kredi değiştirilebilir")
+        balance = int(connection.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM credit_transactions WHERE user_id = ?", (user_id,)).fetchone()["total"])
+        if balance + adjustment < 0:
+            raise ValueError("Kredi bakiyesi sıfırın altına düşemez")
+        timestamp = now()
+        connection.execute("UPDATE users SET status = ?, updated_at = ? WHERE id = ?", (status, timestamp, user_id))
+        connection.execute(
+            "INSERT INTO user_limits (user_id, project_limit, storage_limit_bytes, monthly_render_limit, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET project_limit=excluded.project_limit, storage_limit_bytes=excluded.storage_limit_bytes, monthly_render_limit=excluded.monthly_render_limit, updated_at=excluded.updated_at",
+            (user_id, projects, storage_gb * 1024**3, renders, timestamp),
+        )
+        if adjustment:
+            connection.execute(
+                "INSERT INTO credit_transactions VALUES (?, ?, ?, 'admin', 'Yönetici düzenlemesi', ?, ?)",
+                (str(uuid.uuid4()), user_id, adjustment, json.dumps({"actorId": actor_id}), timestamp),
+            )
+        if status == "suspended":
+            connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    return {"id": user_id, "status": status, "limits": {"projects": projects, "storageGb": storage_gb, "monthlyRenders": renders}, "credits": balance + adjustment}
 
 
 def send_webhook_alert(level: str, source: str, message: str) -> bool:
@@ -587,11 +673,15 @@ def admin_overview() -> dict:
             "revenueTry": float(connection.execute("SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) AS total FROM payment_orders WHERE status = 'paid'").fetchone()["total"]),
         }
         users = connection.execute(
-            "SELECT users.id, users.email, users.name, users.role, users.created_at, "
+            "SELECT users.id, users.email, users.name, users.role, users.status, users.created_at, "
             "(SELECT COUNT(*) FROM projects WHERE projects.user_id = users.id) AS project_count, "
             "(SELECT COALESCE(SUM(size_bytes), 0) FROM media_assets WHERE media_assets.user_id = users.id) AS storage_bytes, "
-            "(SELECT COALESCE(SUM(amount), 0) FROM credit_transactions WHERE credit_transactions.user_id = users.id) AS credits "
-            "FROM users WHERE password_hash != 'disabled' ORDER BY users.created_at DESC LIMIT 100"
+            "(SELECT COALESCE(SUM(amount), 0) FROM credit_transactions WHERE credit_transactions.user_id = users.id) AS credits, "
+            "COALESCE(user_limits.project_limit, ?) AS project_limit, COALESCE(user_limits.storage_limit_bytes, ?) AS storage_limit_bytes, "
+            "COALESCE(user_limits.monthly_render_limit, ?) AS monthly_render_limit "
+            "FROM users LEFT JOIN user_limits ON user_limits.user_id = users.id "
+            "WHERE password_hash != 'disabled' ORDER BY users.created_at DESC LIMIT 100",
+            (MAX_PROJECTS_PER_USER, MAX_STORAGE_BYTES_PER_USER, MAX_MONTHLY_RENDERS_PER_USER),
         ).fetchall()
         payments = connection.execute(
             "SELECT payment_orders.id, users.email, payment_orders.package_id, payment_orders.credits, payment_orders.amount, "
@@ -1542,7 +1632,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             return self._current_user_cache
         if not AUTH_REQUIRED:
             with db() as connection:
-                row = connection.execute("SELECT id, email, name, role FROM users WHERE id = ?", (LOCAL_USER_ID,)).fetchone()
+                row = connection.execute("SELECT id, email, name, role FROM users WHERE id = ? AND status = 'active'", (LOCAL_USER_ID,)).fetchone()
             self._current_user_cache = dict(row) if row else None
             return self._current_user_cache
         cookie = SimpleCookie(self.headers.get("Cookie", ""))
@@ -1553,7 +1643,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         with db() as connection:
             row = connection.execute(
                 "SELECT users.id, users.email, users.name, users.role FROM sessions "
-                "JOIN users ON users.id = sessions.user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ?",
+                "JOIN users ON users.id = sessions.user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ? AND users.status = 'active'",
                 (token_hash, now()),
             ).fetchone()
         self._current_user_cache = dict(row) if row else None
@@ -1670,7 +1760,8 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > MAX_UPLOAD_BYTES:
             raise ValueError("Dosya boş veya yükleme sınırını aşıyor")
-        if user_usage(user["id"])["storage"]["usedBytes"] + length > MAX_STORAGE_BYTES_PER_USER:
+        usage = user_usage(user["id"])
+        if usage["storage"]["usedBytes"] + length > usage["storage"]["limitBytes"]:
             raise ValueError("Depolama kotan dolu. Kullanmadığın medyaları silerek yer açabilirsin")
         filename = " ".join(unquote(self.headers.get("X-File-Name", "medya-dosyasi")).split())[:180]
         kind = str(self.headers.get("X-Media-Kind", "")).lower()
@@ -1731,7 +1822,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 password = str(body.get("password") or "")
                 with db() as connection:
                     row = connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-                if not row or not verify_password(password, row["password_hash"]):
+                if not row or row["status"] != "active" or not verify_password(password, row["password_hash"]):
                     self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "E-posta veya parola hatalı"})
                     return
                 token, expires_at = create_session(row["id"])
@@ -1765,6 +1856,19 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 self.receive_training_video(params.get("profileId", ["default"])[0])
                 return
             body = self.read_json()
+            if route == "/api/admin/users":
+                owner = self.require_owner()
+                if not owner:
+                    return
+                self.send_json(HTTPStatus.CREATED, create_managed_user(body))
+                return
+            if route.startswith("/api/admin/users/") and route.endswith("/update"):
+                owner = self.require_owner()
+                if not owner:
+                    return
+                user_id = route.strip("/").split("/")[3]
+                self.send_json(HTTPStatus.OK, update_managed_user(user_id, body, owner["id"]))
+                return
             if route == "/api/payments/iyzico/checkout":
                 result = initialize_credit_checkout(user, str(body.get("packageId") or ""), body.get("billing") or {}, self.client_address[0])
                 self.send_json(HTTPStatus.CREATED, result)
@@ -1861,7 +1965,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                         project_id = str(uuid.uuid4())
                     if not exists:
                         project_total = connection.execute("SELECT COUNT(*) AS total FROM projects WHERE user_id = ?", (user["id"],)).fetchone()["total"]
-                        if project_total >= MAX_PROJECTS_PER_USER:
+                        if project_total >= user_usage(user["id"])["projects"]["limit"]:
                             raise ValueError("Proje kotan dolu. Yeni proje açmak için eski bir projeyi silebilirsin")
                     if exists:
                         connection.execute(
@@ -1885,7 +1989,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Proje bulunamadı"})
                         return
                     project_total = connection.execute("SELECT COUNT(*) AS total FROM projects WHERE user_id = ?", (user["id"],)).fetchone()["total"]
-                    if project_total >= MAX_PROJECTS_PER_USER:
+                    if project_total >= user_usage(user["id"])["projects"]["limit"]:
                         raise ValueError("Proje kotan dolu. Çoğaltmak için eski bir projeyi silebilirsin")
                     duplicate_id = str(uuid.uuid4())
                     timestamp = now()
@@ -1903,7 +2007,8 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 project_id = str(body.get("projectId") or "")
                 job_id = str(uuid.uuid4())
                 timestamp = now()
-                if user_usage(user["id"])["renders"]["used"] >= MAX_MONTHLY_RENDERS_PER_USER:
+                render_usage = user_usage(user["id"])["renders"]
+                if render_usage["used"] >= render_usage["limit"]:
                     self.send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Aylık render kotan doldu. Yeni dönem başladığında tekrar render alabilirsin."})
                     return
                 with DB_LOCK, db() as connection:

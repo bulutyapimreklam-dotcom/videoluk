@@ -170,6 +170,7 @@ Kredi paketleri, abonelik, ekip çalışma alanı, marka kiti, şablonlar, kulla
 - Owner rolüne özel kullanıcı, proje, depolama, render ve ödeme özetli yönetim ekranı
 - Disk, kuyruk ve 24 saatlik hata ölçümleri; sınırlı sistem olay günlüğü ve yönetici uyarıları
 - Sağlayıcıdan bağımsız HTTPS webhook hata alarmı, Bearer yetkilendirmesi ve tekrar bildirim koruması
+- Owner tarafından kullanıcı oluşturma, kredi düzenleme, kullanıcıya özel kota ve hesap pasifleştirme
 - Altyazı açma/kapama, stil ve konumun gerçek rendera aktarılması
 - Kuyruklu FFmpeg render, yeniden başlatma kurtarması, MP4 ve SRT indirme
 - Docker/Caddy üretim paketi, özel beta erişim koruması ve GitHub doğrulama hattı

@@ -268,7 +268,7 @@ class VideolukCoreTests(unittest.TestCase):
                 stamp = server.now()
                 with server.db() as connection:
                     connection.execute(
-                        "INSERT INTO users VALUES (?, ?, ?, ?, 'member', ?, ?)",
+                        "INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at, status) VALUES (?, ?, ?, ?, 'member', ?, ?, 'active')",
                         ("member-1", "uye@example.com", "Üye", server.hash_password("guvenli-parola-123"), stamp, stamp),
                     )
                     connection.execute(
@@ -343,6 +343,45 @@ class VideolukCoreTests(unittest.TestCase):
             self.assertIn("Render başarısız", payload["text"])
         finally:
             server.ALERT_LAST_SENT.clear()
+            for name, value in originals.items():
+                setattr(server, name, value)
+
+    def test_owner_can_create_and_manage_user_limits(self):
+        originals = {
+            "DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES,
+            "MEDIA_CACHE": server.MEDIA_CACHE, "GENERATED_IMAGES": server.GENERATED_IMAGES,
+            "TRAINING_VIDEOS": server.TRAINING_VIDEOS, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH,
+        }
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root
+                server.OUTPUTS = root / "renders"
+                server.VOICES = root / "voices"
+                server.MEDIA_CACHE = root / "media-cache"
+                server.GENERATED_IMAGES = root / "generated-images"
+                server.TRAINING_VIDEOS = root / "training-videos"
+                server.UPLOADS = root / "uploads"
+                server.DB_PATH = root / "videoluk.db"
+                server.initialize()
+                user = server.create_managed_user({"name": "Test Üye", "email": "UYE@example.com", "password": "guvenli-parola-123"})
+                self.assertEqual("uye@example.com", user["email"])
+                token, _expires = server.create_session(user["id"])
+                result = server.update_managed_user(user["id"], {
+                    "projectLimit": 12, "storageLimitGb": 9, "monthlyRenderLimit": 25,
+                    "creditAdjustment": 30, "status": "suspended",
+                }, server.LOCAL_USER_ID)
+                self.assertEqual("suspended", result["status"])
+                self.assertEqual(server.STARTER_CREDITS + 30, result["credits"])
+                usage = server.user_usage(user["id"])
+                self.assertEqual(12, usage["projects"]["limit"])
+                self.assertEqual(9 * 1024**3, usage["storage"]["limitBytes"])
+                self.assertEqual(25, usage["renders"]["limit"])
+                with server.db() as connection:
+                    self.assertIsNone(connection.execute("SELECT 1 FROM sessions WHERE token_hash = ?", (server.session_token_hash(token),)).fetchone())
+                with self.assertRaisesRegex(ValueError, "zaten kayıtlı"):
+                    server.create_managed_user({"name": "Tekrar", "email": "uye@example.com", "password": "guvenli-parola-456"})
+        finally:
             for name, value in originals.items():
                 setattr(server, name, value)
 
