@@ -52,6 +52,18 @@ docker compose -f compose.production.yaml up -d --build
 docker run --rm caddy:2-alpine caddy hash-password --plaintext 'uzun-ve-guclu-parolaniz'
 ```
 
+Üretim yönetimi tek komutlu yardımcıyla yapılır:
+
+```bash
+./deploy/manage.sh validate  # Güvenlik ve ortam ayarlarını kontrol eder
+./deploy/manage.sh deploy    # Doğrular, imajı kurar ve servisleri başlatır
+./deploy/manage.sh status    # Container ve API sağlık durumunu gösterir
+./deploy/manage.sh logs      # Uygulama ve Caddy günlüklerini izler
+./deploy/manage.sh backup    # Çalışan veritabanının tutarlı anlık görüntüsünü ve medyayı arşivler
+```
+
+Yedekler varsayılan olarak depo kökündeki `backups/` klasörüne UTC zaman damgasıyla yazılır. Başka bir disk kullanmak için `VIDEOLUK_BACKUP_DIR=/mnt/videoluk-backups` tanımlanabilir. Yedek arşivi SQLite çevrimiçi backup API'siyle alınan tutarlı veritabanını, kullanıcı medyasını, renderları ve ses dosyalarını içerir; API anahtarlarını içeren `.env` dosyasını içermez.
+
 Bu dış koruma ilk özel beta içindir; uygulama internete parolasız açılmaz. Kullanıcı hesapları yeterince olgunlaştığında Caddy katmanındaki ortak beta parolası kaldırılabilir.
 
 Videoluk ayrıca uygulama içinde kullanıcıya özel oturum ve proje izolasyonu uygular. `.env` içinde aşağıdaki alanlar doldurulur:
