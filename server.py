@@ -11,6 +11,8 @@ import hashlib
 import html
 import mimetypes
 import os
+import base64
+import binascii
 from concurrent.futures import ThreadPoolExecutor
 import shutil
 import sqlite3
@@ -34,6 +36,7 @@ DATA = Path(os.getenv("VIDEOLUK_DATA_DIR", ROOT / "data"))
 OUTPUTS = DATA / "renders"
 VOICES = DATA / "voices"
 MEDIA_CACHE = DATA / "media-cache"
+GENERATED_IMAGES = DATA / "generated-images"
 TRAINING_VIDEOS = DATA / "training-videos"
 DB_PATH = DATA / "videoluk.db"
 FFMPEG = os.getenv("FFMPEG_BIN", "ffmpeg")
@@ -44,6 +47,10 @@ LLM_URL = os.getenv("VIDEOLUK_LLM_URL", "").rstrip("/")
 LLM_MODEL = os.getenv("VIDEOLUK_LLM_MODEL", "")
 LLM_API_KEY = os.getenv("VIDEOLUK_LLM_API_KEY", "")
 LLM_TIMEOUT = int(os.getenv("VIDEOLUK_LLM_TIMEOUT", "60"))
+IMAGE_URL = os.getenv("VIDEOLUK_IMAGE_URL", "").rstrip("/")
+IMAGE_MODEL = os.getenv("VIDEOLUK_IMAGE_MODEL", "")
+IMAGE_API_KEY = os.getenv("VIDEOLUK_IMAGE_API_KEY", "")
+IMAGE_TIMEOUT = int(os.getenv("VIDEOLUK_IMAGE_TIMEOUT", "180"))
 PEXELS_API_KEY = os.getenv("VIDEOLUK_PEXELS_API_KEY", "")
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
 MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
@@ -87,6 +94,7 @@ def initialize() -> None:
     OUTPUTS.mkdir(parents=True, exist_ok=True)
     VOICES.mkdir(parents=True, exist_ok=True)
     MEDIA_CACHE.mkdir(parents=True, exist_ok=True)
+    GENERATED_IMAGES.mkdir(parents=True, exist_ok=True)
     TRAINING_VIDEOS.mkdir(parents=True, exist_ok=True)
     with db() as connection:
         connection.executescript(
@@ -413,11 +421,13 @@ def generate_local_script(payload: dict) -> dict:
     scene_count = 3 if duration <= 30 else 4 if duration <= 60 else 5
     scene_templates = [
         (opener, f"{idea.capitalize()} neden şimdi önemli, birlikte bakalım."),
-        ("Fikrin merkezinde gerçek bir ihtiyaç var.", f"{idea.capitalize()}, karmaşık görünen süreci daha anlaşılır ve ulaşılabilir hâle getiriyor."),
+        ("Fikrin merkezinde gerçek bir ihtiyaç var.", "İnsanların gündelik deneyimindeki sorunu görünür kılmak, doğru çözümün ilk adımıdır."),
         ("Değer, ayrıntılarda ortaya çıkar.", "Doğru yaklaşım; zamanı verimli kullanır, deneyimi sadeleştirir ve insanlara güven verir."),
         ("Şimdi bunu hayata geçirme zamanı.", f"{idea.capitalize()} ile ilk adımı bugün atabilir, sonucu kendi gözlerinle görebilirsin."),
         ("Gelecek, harekete geçenlerin olur.", "Fikrini erteleme; anlat, üret ve doğru insanlarla buluştur."),
-    ][:scene_count]
+    ]
+    template_indexes = {3: [0, 1, 3], 4: [0, 1, 2, 3], 5: [0, 1, 2, 3, 4]}[scene_count]
+    scene_templates = [scene_templates[index] for index in template_indexes]
     scenes = [
         {"title": title, "subtitle": subtitle, "purpose": "Kanca" if i == 0 else "Kapanış" if i == scene_count - 1 else "Ana fikir"}
         for i, (title, subtitle) in enumerate(scene_templates)
@@ -647,36 +657,47 @@ def search_stock_videos(query: str, orientation: str, per_page: int = 8) -> dict
 
 
 def search_commons_images(query: str, per_page: int = 8) -> dict:
-    params = urlencode({
-        "action": "query", "generator": "search", "gsrsearch": f"{query} filetype:bitmap",
-        "gsrnamespace": 6, "gsrlimit": max(1, min(20, per_page)), "prop": "imageinfo",
-        "iiprop": "url|extmetadata", "iiurlwidth": 720, "format": "json", "formatversion": 2,
-    })
-    request = Request(
-        f"https://commons.wikimedia.org/w/api.php?{params}",
-        headers={"User-Agent": "Videoluk/0.1 (stock image search)"},
-    )
+    stopwords = {"bir", "ve", "ile", "için", "neden", "şimdi", "önemli", "birlikte", "bakalım", "video", "videosu", "saniyelik", "tanıtım", "anlatan", "gerçek", "merkezinde", "hazır", "mısın"}
+    words = [word.strip(".,!?;:()[]\"'") for word in query.split()]
+    meaningful = [word for word in words if len(word) > 2 and word.casefold() not in stopwords]
+    variants = [query, " ".join(meaningful[:4]), " ".join(meaningful[:2])]
+    variants.extend(word for word in meaningful if word[:1].isupper())
+    variants = list(dict.fromkeys(value.strip() for value in variants if len(value.strip()) >= 2))
     try:
-        with urlopen(request, timeout=20) as response:
-            data = json.loads(response.read().decode("utf-8"))
         results = []
-        for page in data.get("query", {}).get("pages", []):
-            info = (page.get("imageinfo") or [{}])[0]
-            metadata = info.get("extmetadata") or {}
-            image_url = info.get("url")
-            if not image_url:
-                continue
-            creator = metadata.get("Artist", {}).get("value") or metadata.get("Credit", {}).get("value") or "Wikimedia Commons"
-            creator = html.unescape(re.sub(r"<[^>]+>", " ", creator))
-            creator = " ".join(creator.split())
-            results.append({
-                "id": str(page.get("pageid")), "mediaType": "image",
-                "thumbnail": info.get("thumburl") or image_url, "imageUrl": image_url,
-                "creator": creator[:160], "duration": None,
-                "sourceUrl": info.get("descriptionurl"),
-                "license": metadata.get("LicenseShortName", {}).get("value") or "Commons lisansı",
+        used_variant = query
+        for variant in variants:
+            params = urlencode({
+                "action": "query", "generator": "search", "gsrsearch": f"{variant} filetype:bitmap",
+                "gsrnamespace": 6, "gsrlimit": max(1, min(20, per_page)), "prop": "imageinfo",
+                "iiprop": "url|extmetadata", "iiurlwidth": 720, "format": "json", "formatversion": 2,
             })
-        return {"configured": True, "provider": "wikimedia", "results": results}
+            request = Request(
+                f"https://commons.wikimedia.org/w/api.php?{params}",
+                headers={"User-Agent": "Videoluk/0.1 (stock image search)"},
+            )
+            with urlopen(request, timeout=20) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            for page in data.get("query", {}).get("pages", []):
+                info = (page.get("imageinfo") or [{}])[0]
+                metadata = info.get("extmetadata") or {}
+                image_url = info.get("url")
+                if not image_url:
+                    continue
+                creator = metadata.get("Artist", {}).get("value") or metadata.get("Credit", {}).get("value") or "Wikimedia Commons"
+                creator = html.unescape(re.sub(r"<[^>]+>", " ", creator))
+                creator = " ".join(creator.split())
+                results.append({
+                    "id": str(page.get("pageid")), "mediaType": "image",
+                    "thumbnail": info.get("thumburl") or image_url, "imageUrl": image_url,
+                    "creator": creator[:160], "duration": None,
+                    "sourceUrl": info.get("descriptionurl"),
+                    "license": metadata.get("LicenseShortName", {}).get("value") or "Commons lisansı",
+                })
+            if results:
+                used_variant = variant
+                break
+        return {"configured": True, "provider": "wikimedia", "queryUsed": used_variant, "results": results}
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise ValueError(f"Wikimedia Commons servisine ulaşılamadı: {exc}") from exc
 
@@ -689,20 +710,72 @@ def generate_voice(text: str) -> dict:
         raise ValueError("Seslendirme metni en fazla 4000 karakter olabilir")
     voice_id = str(uuid.uuid4())
     target = VOICES / f"{voice_id}.wav"
+    result = None
     if shutil.which("say"):
         intermediate = VOICES / f"{voice_id}.aiff"
         result = subprocess.run(["say", "-v", "Yelda", "-o", str(intermediate), clean_text], capture_output=True, text=True)
         if result.returncode == 0:
             result = subprocess.run([FFMPEG, "-y", "-i", str(intermediate), "-ar", "44100", "-ac", "2", str(target)], capture_output=True, text=True)
         intermediate.unlink(missing_ok=True)
-    elif shutil.which("espeak-ng"):
+    if (result is None or result.returncode != 0 or not target.is_file() or target.stat().st_size < 1024) and shutil.which("espeak-ng"):
+        target.unlink(missing_ok=True)
         result = subprocess.run(["espeak-ng", "-v", "tr", "-s", "155", "-w", str(target), clean_text], capture_output=True, text=True)
-    else:
+    if result is None:
         raise ValueError("Sunucuda seslendirme motoru bulunamadı")
     if result.returncode != 0 or not target.is_file() or target.stat().st_size < 1024:
         target.unlink(missing_ok=True)
         raise ValueError("Seslendirme üretilemedi")
     return {"id": voice_id, "audioUrl": f"/api/voices/{voice_id}", "provider": "system-tts"}
+
+
+def image_endpoint() -> str:
+    if IMAGE_URL.endswith("/images/generations"):
+        return IMAGE_URL
+    return f"{IMAGE_URL}/v1/images/generations"
+
+
+def generate_scene_image(prompt: str, orientation: str) -> dict:
+    clean_prompt = " ".join(prompt.split()).strip()
+    if len(clean_prompt) < 5:
+        raise ValueError("Görsel üretmek için daha açıklayıcı bir istem yaz")
+    if len(clean_prompt) > 1200:
+        raise ValueError("Görsel istemi en fazla 1200 karakter olabilir")
+    if not IMAGE_URL or not IMAGE_MODEL:
+        raise ValueError("Yapay zekâ görsel motoru henüz yapılandırılmadı")
+    size = {"vertical": "1024x1536", "horizontal": "1536x1024", "square": "1024x1024"}.get(orientation, "1024x1536")
+    request_body = {
+        "model": IMAGE_MODEL,
+        "prompt": clean_prompt,
+        "size": size,
+        "n": 1,
+        "response_format": "b64_json",
+    }
+    headers = {"Content-Type": "application/json"}
+    if IMAGE_API_KEY:
+        headers["Authorization"] = f"Bearer {IMAGE_API_KEY}"
+    request = Request(
+        image_endpoint(), data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
+        headers=headers, method="POST",
+    )
+    try:
+        with urlopen(request, timeout=IMAGE_TIMEOUT) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        encoded = ((result.get("data") or [{}])[0]).get("b64_json")
+        if not encoded:
+            raise ValueError("Görsel sağlayıcısı dosya verisi döndürmedi")
+        image_bytes = base64.b64decode(encoded, validate=True)
+        if len(image_bytes) < 1024 or len(image_bytes) > MAX_MEDIA_BYTES:
+            raise ValueError("Üretilen görsel geçersiz veya boyut sınırını aşıyor")
+        image_id = str(uuid.uuid4())
+        target = GENERATED_IMAGES / f"{image_id}.png"
+        target.write_bytes(image_bytes)
+        return {
+            "id": image_id, "assetId": image_id, "mediaType": "image",
+            "thumbnail": f"/api/images/{image_id}", "imageUrl": f"/api/images/{image_id}",
+            "creator": "Videoluk AI", "provider": "ai", "prompt": clean_prompt,
+        }
+    except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError, binascii.Error) as exc:
+        raise ValueError(f"Yapay zekâ görseli üretilemedi: {exc}") from exc
 
 
 def validate_stock_url(url: str) -> str:
@@ -719,6 +792,12 @@ def validate_stock_url(url: str) -> str:
 
 
 def download_stock_video(media: dict) -> Path:
+    asset_id = "".join(character for character in str(media.get("assetId") or "") if character.isalnum() or character == "-")[:64]
+    if asset_id:
+        local_image = GENERATED_IMAGES / f"{asset_id}.png"
+        if local_image.is_file() and local_image.stat().st_size > 1024:
+            return local_image
+        raise ValueError("Üretilen görsel dosyası bulunamadı")
     media_type = "image" if media.get("imageUrl") else "video"
     url = validate_stock_url(str(media.get("videoUrl") or media.get("imageUrl") or ""))
     media_id = "".join(character for character in str(media.get("id") or "") if character.isalnum())[:64]
@@ -827,11 +906,22 @@ def render(job_id: str, project: dict) -> None:
                 "drawbox=x='iw*0.62-mod(t*30,iw*0.3)':y=-ih*0.12:w=iw*0.52:h=ih*0.38:color=#c9ff5b@0.88:t=fill"
             )
             video_input = ["-f", "lavfi", "-i", f"color=c=#173e39:s={width}x{height}:r=30:d={duration}"]
-        if ffmpeg_has_filter("subtitles"):
+        captions = payload.get("captions") if isinstance(payload.get("captions"), dict) else {}
+        captions_enabled = captions.get("enabled", True) is not False
+        caption_style = str(captions.get("style") or "classic")
+        caption_position = str(captions.get("position") or "bottom")
+        alignment = {"top": 8, "middle": 5, "bottom": 2}.get(caption_position, 2)
+        margin = 90 if caption_position != "middle" else 20
+        style_values = {
+            "classic": "PrimaryColour=&H00FFFFFF,BackColour=&H9917211D,FontSize=28,BorderStyle=3",
+            "bold": "PrimaryColour=&H0017211D,BackColour=&H005BFFC9,FontSize=32,Bold=1,BorderStyle=3",
+            "minimal": "PrimaryColour=&H00FFFFFF,BackColour=&H00000000,FontSize=26,BorderStyle=1,Outline=2",
+        }.get(caption_style, "PrimaryColour=&H00FFFFFF,BackColour=&H9917211D,FontSize=28,BorderStyle=3")
+        if captions_enabled and ffmpeg_has_filter("subtitles"):
             video_filters += (
                 f",subtitles=filename='{escaped_srt}':"
-                "force_style='Alignment=2,MarginV=120,FontSize=28,PrimaryColour=&H00FFFFFF,"
-                "OutlineColour=&H0017211D,BorderStyle=3,Outline=1,Shadow=0,BackColour=&H9917211D'"
+                f"force_style='Alignment={alignment},MarginV={margin},{style_values},"
+                "OutlineColour=&H0017211D,Outline=1,Shadow=0'"
             )
         filter_graph = f"[0:v]{video_filters}[v]"
         voice_id = str(payload.get("voiceId") or "")
@@ -1064,16 +1154,29 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             if route == "/api/voices/generate":
                 self.send_json(HTTPStatus.CREATED, generate_voice(str(body.get("text") or "")))
                 return
+            if route == "/api/images/generate":
+                self.send_json(HTTPStatus.CREATED, generate_scene_image(
+                    str(body.get("prompt") or ""), str(body.get("orientation") or "vertical")
+                ))
+                return
             if route == "/api/projects":
-                project_id = str(uuid.uuid4())
+                requested_id = str(body.get("id") or "")
+                project_id = requested_id if requested_id.replace("-", "").isalnum() else str(uuid.uuid4())
                 timestamp = now()
                 title = str(body.get("title") or "Adsız Videoluk Projesi")[:120]
                 with DB_LOCK, db() as connection:
-                    connection.execute(
-                        "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
-                        (project_id, title, json.dumps(body, ensure_ascii=False), timestamp, timestamp),
-                    )
-                self.send_json(HTTPStatus.CREATED, {"id": project_id, "title": title})
+                    exists = connection.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone()
+                    if exists:
+                        connection.execute(
+                            "UPDATE projects SET title = ?, payload = ?, updated_at = ? WHERE id = ?",
+                            (title, json.dumps(body, ensure_ascii=False), timestamp, project_id),
+                        )
+                    else:
+                        connection.execute(
+                            "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
+                            (project_id, title, json.dumps(body, ensure_ascii=False), timestamp, timestamp),
+                        )
+                self.send_json(HTTPStatus.OK if exists else HTTPStatus.CREATED, {"id": project_id, "title": title, "saved": True})
                 return
             if route == "/api/renders":
                 project_id = str(body.get("projectId") or "")
@@ -1115,6 +1218,8 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "status": "ok",
                 "textEngine": "ai" if LLM_URL and LLM_MODEL else "local",
                 "model": LLM_MODEL or None,
+                "imageEngine": "ai" if IMAGE_URL and IMAGE_MODEL else "stock-fallback",
+                "imageModel": IMAGE_MODEL or None,
                 "stockProvider": "pexels" if PEXELS_API_KEY else None,
                 "voiceEngine": "system-tts" if shutil.which("say") or shutil.which("espeak-ng") else None,
             })
@@ -1129,6 +1234,13 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 profile["feedbackCount"] = len(editing_training_context(profile["id"], 100))
                 profiles.append(profile)
             self.send_json(HTTPStatus.OK, {"profiles": profiles})
+            return
+        if route == "/api/projects":
+            with db() as connection:
+                rows = connection.execute(
+                    "SELECT id, title, created_at, updated_at FROM projects ORDER BY updated_at DESC LIMIT 50"
+                ).fetchall()
+            self.send_json(HTTPStatus.OK, {"projects": [dict(row) for row in rows]})
             return
         if route == "/api/training-videos":
             params = parse_qs(urlparse(self.path).query)
@@ -1159,6 +1271,23 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("Content-Length", str(path.stat().st_size))
+            self.end_headers()
+            with path.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile)
+            return
+        if route.startswith("/api/images/"):
+            image_id = route.rsplit("/", 1)[-1]
+            if not image_id.replace("-", "").isalnum():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            path = GENERATED_IMAGES / f"{image_id}.png"
+            if not path.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(path.stat().st_size))
+            self.send_header("Cache-Control", "private, max-age=31536000, immutable")
             self.end_headers()
             with path.open("rb") as source:
                 shutil.copyfileobj(source, self.wfile)

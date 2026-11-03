@@ -147,3 +147,20 @@ Kredi paketleri, abonelik, ekip çalışma alanı, marka kiti, şablonlar, kulla
 ## İlk teslim hedefi
 
 İlk gerçek MVP'nin kabul ölçütü: Kullanıcı bir metin girer, sistem en az üç sahne oluşturur, sahnelere stok veya yüklenmiş medya bağlar, Türkçe seslendirme ve altyazı üretir, timeline üzerinde düzenleme sunar ve bağımsız FFmpeg worker üzerinden indirilebilir 1080p MP4 hazırlar.
+
+## Mevcut teslim durumu
+
+İlk çalışan ürün hedefi tamamlandı:
+
+- Fikirden düzenlenebilir Türkçe senaryo ve sahne planı
+- Dikey, yatay ve kare proje oluşturma
+- Pexels veya ücretsiz Wikimedia üzerinden otomatik stok medya yerleştirme
+- OpenAI uyumlu, değiştirilebilir yapay zekâ görsel sağlayıcısı ve stok geri dönüşü
+- Sunucu TTS seslendirmesi; geliştirme ortamında tarayıcı önizlemesi
+- Sahne metni/görsel istemi düzenleme, medya değiştirme, bölme, çoğaltma, silme, hız ve sürükle-bırak sıralama
+- Geri al/ileri al, tarayıcı taslağı ve SQLite sunucu otomatik kaydı
+- Altyazı açma/kapama, stil ve konumun gerçek rendera aktarılması
+- Kuyruklu FFmpeg render, yeniden başlatma kurtarması, MP4 ve SRT indirme
+- Docker/Caddy üretim paketi, özel beta erişim koruması ve GitHub doğrulama hattı
+
+Kurgu DNA eğitim katmanının sonraki geliştirmeleri ürün sahibinin isteğiyle ertelenmiştir. Mevcut profil ve geri bildirim altyapısı korunur; ana video üretim akışını engellemez.

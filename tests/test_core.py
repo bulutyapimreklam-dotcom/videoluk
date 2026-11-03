@@ -16,6 +16,9 @@ class VideolukCoreTests(unittest.TestCase):
         })
         self.assertEqual(4, len(result["scenes"]))
         self.assertEqual(4, len({scene["subtitle"] for scene in result["scenes"]}))
+        self.assertEqual("Kapanış", result["scenes"][-1]["purpose"])
+        short = server.generate_local_script({"idea": "Temiz ulaşım", "duration": 30})
+        self.assertIn("hayata geçirme", short["scenes"][-1]["title"].casefold())
 
     def test_biography_subject_detection(self):
         self.assertEqual("Bülent Ecevit", server.biography_subject("Bülent Ecevit biyografisi"))
@@ -67,6 +70,7 @@ class VideolukCoreTests(unittest.TestCase):
             "OUTPUTS": server.OUTPUTS,
             "VOICES": server.VOICES,
             "MEDIA_CACHE": server.MEDIA_CACHE,
+            "GENERATED_IMAGES": server.GENERATED_IMAGES,
             "DB_PATH": server.DB_PATH,
             "submit_render": server.submit_render,
         }
@@ -78,6 +82,7 @@ class VideolukCoreTests(unittest.TestCase):
                 server.OUTPUTS = root / "renders"
                 server.VOICES = root / "voices"
                 server.MEDIA_CACHE = root / "media-cache"
+                server.GENERATED_IMAGES = root / "generated-images"
                 server.DB_PATH = root / "videoluk.db"
                 server.submit_render = lambda job_id, project: submitted.append((job_id, project))
                 server.initialize()
@@ -112,6 +117,7 @@ class VideolukCoreTests(unittest.TestCase):
             "OUTPUTS": server.OUTPUTS,
             "VOICES": server.VOICES,
             "MEDIA_CACHE": server.MEDIA_CACHE,
+            "GENERATED_IMAGES": server.GENERATED_IMAGES,
             "TRAINING_VIDEOS": server.TRAINING_VIDEOS,
             "DB_PATH": server.DB_PATH,
         }
@@ -122,6 +128,7 @@ class VideolukCoreTests(unittest.TestCase):
                 server.OUTPUTS = root / "renders"
                 server.VOICES = root / "voices"
                 server.MEDIA_CACHE = root / "media-cache"
+                server.GENERATED_IMAGES = root / "generated-images"
                 server.TRAINING_VIDEOS = root / "training-videos"
                 server.DB_PATH = root / "videoluk.db"
                 server.initialize()
@@ -141,6 +148,19 @@ class VideolukCoreTests(unittest.TestCase):
         finally:
             for name, value in originals.items():
                 setattr(server, name, value)
+
+    def test_generated_image_asset_is_resolved_without_network(self):
+        original = server.GENERATED_IMAGES
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                server.GENERATED_IMAGES = Path(temporary)
+                asset = server.GENERATED_IMAGES / "asset-1.png"
+                asset.write_bytes(b"x" * 2048)
+                self.assertEqual(asset, server.download_stock_video({"assetId": "asset-1"}))
+                with self.assertRaises(ValueError):
+                    server.download_stock_video({"assetId": "missing"})
+        finally:
+            server.GENERATED_IMAGES = original
 
 
 if __name__ == "__main__":
