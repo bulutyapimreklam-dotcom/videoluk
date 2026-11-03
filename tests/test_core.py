@@ -309,6 +309,43 @@ class VideolukCoreTests(unittest.TestCase):
             for name, value in originals.items():
                 setattr(server, name, value)
 
+    def test_webhook_alert_is_authenticated_and_deduplicated(self):
+        originals = {
+            "ALERT_WEBHOOK_URL": server.ALERT_WEBHOOK_URL,
+            "ALERT_WEBHOOK_TOKEN": server.ALERT_WEBHOOK_TOKEN,
+            "urlopen": server.urlopen,
+        }
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"ok"
+
+        try:
+            server.ALERT_WEBHOOK_URL = "https://alerts.example.test/videoluk"
+            server.ALERT_WEBHOOK_TOKEN = "secret-token"
+            server.ALERT_LAST_SENT.clear()
+            server.urlopen = lambda request, timeout: requests.append((request, timeout)) or Response()
+            self.assertTrue(server.send_webhook_alert("error", "render", "Render başarısız"))
+            self.assertFalse(server.send_webhook_alert("error", "render", "Render başarısız"))
+            self.assertEqual(1, len(requests))
+            request, timeout = requests[0]
+            self.assertEqual(10, timeout)
+            self.assertEqual("Bearer secret-token", request.get_header("Authorization"))
+            payload = json.loads(request.data.decode("utf-8"))
+            self.assertEqual("videoluk", payload["service"])
+            self.assertIn("Render başarısız", payload["text"])
+        finally:
+            server.ALERT_LAST_SENT.clear()
+            for name, value in originals.items():
+                setattr(server, name, value)
+
     def test_iyzico_callback_credits_order_only_once(self):
         originals = {"DATA": server.DATA, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH, "iyzico_request": server.iyzico_request}
         try:

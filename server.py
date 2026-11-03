@@ -21,6 +21,7 @@ import shutil
 import sqlite3
 import subprocess
 import threading
+import time
 import traceback
 import uuid
 import re
@@ -82,9 +83,15 @@ CREDIT_PACKAGES = {
 RENDER_WORKERS = max(1, min(4, int(os.getenv("VIDEOLUK_RENDER_WORKERS", "1"))))
 MAX_QUEUED_RENDERS = max(1, int(os.getenv("VIDEOLUK_MAX_QUEUED_RENDERS", "8")))
 ALLOWED_ORIGIN = os.getenv("VIDEOLUK_ALLOWED_ORIGIN", "").rstrip("/")
+ALERT_WEBHOOK_URL = os.getenv("VIDEOLUK_ALERT_WEBHOOK_URL", "").strip()
+ALERT_WEBHOOK_TOKEN = os.getenv("VIDEOLUK_ALERT_WEBHOOK_TOKEN", "").strip()
+ALERT_COOLDOWN_SECONDS = max(60, int(os.getenv("VIDEOLUK_ALERT_COOLDOWN_SECONDS", "300")))
 DB_LOCK = threading.Lock()
+ALERT_LOCK = threading.Lock()
+ALERT_LAST_SENT: dict[str, float] = {}
 RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=RENDER_WORKERS, thread_name_prefix="videoluk-render")
 ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videoluk-analysis")
+ALERT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videoluk-alert")
 
 
 def ffmpeg_has_filter(filter_name: str) -> bool:
@@ -482,6 +489,45 @@ def user_usage(user_id: str) -> dict:
     }
 
 
+def send_webhook_alert(level: str, source: str, message: str) -> bool:
+    if not ALERT_WEBHOOK_URL:
+        return False
+    parsed = urlparse(ALERT_WEBHOOK_URL)
+    if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1"}:
+        raise ValueError("Alarm webhook adresi HTTPS kullanmalı")
+    key = f"{level}:{source}:{message[:160]}"
+    with ALERT_LOCK:
+        current = time.monotonic()
+        if current - ALERT_LAST_SENT.get(key, 0) < ALERT_COOLDOWN_SECONDS:
+            return False
+        ALERT_LAST_SENT[key] = current
+    title = f"Videoluk {level.upper()} · {source}"
+    text = f"{title}\n{message[:1000]}"
+    payload = json.dumps({"text": text, "content": text, "service": "videoluk", "level": level, "source": source}, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json", "User-Agent": "Videoluk-Alert/1.0"}
+    if ALERT_WEBHOOK_TOKEN:
+        headers["Authorization"] = f"Bearer {ALERT_WEBHOOK_TOKEN}"
+    request = Request(ALERT_WEBHOOK_URL, data=payload, method="POST", headers=headers)
+    with urlopen(request, timeout=10) as response:
+        response.read(1024)
+    return True
+
+
+def _deliver_system_alert(level: str, source: str, message: str) -> None:
+    try:
+        send_webhook_alert(level, source, message)
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            with DB_LOCK, db() as connection:
+                connection.execute(
+                    "INSERT INTO system_events VALUES (?, 'warning', 'alert', ?, NULL, ?)",
+                    (str(uuid.uuid4()), f"Webhook bildirimi gönderilemedi: {str(exc)[:500]}", now()),
+                )
+        except Exception:
+            traceback.print_exc()
+
+
 def record_system_event(level: str, source: str, message: str, metadata: dict | None = None) -> None:
     safe_level = level if level in {"info", "warning", "error"} else "error"
     try:
@@ -495,6 +541,8 @@ def record_system_event(level: str, source: str, message: str, metadata: dict | 
             )
     except Exception:
         traceback.print_exc()
+    if safe_level == "error" and ALERT_WEBHOOK_URL:
+        ALERT_EXECUTOR.submit(_deliver_system_alert, safe_level, source[:80], message[:1000])
 
 
 def operational_status() -> dict:
@@ -523,6 +571,7 @@ def operational_status() -> dict:
         "errors24h": errors,
         "disk": {"usedBytes": disk.used, "totalBytes": disk.total, "percent": disk_percent},
         "alerts": alerts,
+        "notificationsConfigured": bool(ALERT_WEBHOOK_URL),
     }
 
 
@@ -650,6 +699,7 @@ def initialize_credit_checkout(user: dict, package_id: str, billing: dict, ip_ad
     except Exception as exc:
         with DB_LOCK, db() as connection:
             connection.execute("UPDATE payment_orders SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", (str(exc)[:500], now(), order_id))
+        record_system_event("error", "payment", str(exc), {"orderId": order_id})
         raise
 
 
@@ -677,6 +727,8 @@ def complete_iyzico_order(order_id: str, token: str) -> bool:
             )
         elif not approved:
             connection.execute("UPDATE payment_orders SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", ("Ödeme onaylanmadı", now(), order_id))
+    if not approved:
+        record_system_event("warning", "payment", "iyzico ödemesi onaylanmadı", {"orderId": order_id})
     return approved
 
 
@@ -2144,3 +2196,4 @@ if __name__ == "__main__":
         server.server_close()
         RENDER_EXECUTOR.shutdown(wait=False, cancel_futures=False)
         ANALYSIS_EXECUTOR.shutdown(wait=False, cancel_futures=False)
+        ALERT_EXECUTOR.shutdown(wait=False, cancel_futures=False)

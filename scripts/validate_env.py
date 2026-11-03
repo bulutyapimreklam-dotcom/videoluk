@@ -41,6 +41,9 @@ def validate(values: dict[str, str]) -> list[str]:
     iyzico_values = (values.get("VIDEOLUK_IYZICO_API_KEY", ""), values.get("VIDEOLUK_IYZICO_SECRET_KEY", ""))
     if any(iyzico_values) and not all(iyzico_values):
         errors.append("iyzico API ve secret anahtarları birlikte girilmeli")
+    webhook_url = values.get("VIDEOLUK_ALERT_WEBHOOK_URL", "")
+    if webhook_url and not webhook_url.startswith("https://"):
+        errors.append("VIDEOLUK_ALERT_WEBHOOK_URL üretimde HTTPS kullanmalı")
     return errors
 
 

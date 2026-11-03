@@ -37,6 +37,8 @@ class OperationsTests(unittest.TestCase):
         errors = validate_env.validate(invalid)
         self.assertTrue(any("SECURE_COOKIES" in error for error in errors))
         self.assertTrue(any("PUBLIC_BASE_URL" in error for error in errors))
+        webhook_errors = validate_env.validate(dict(valid, VIDEOLUK_ALERT_WEBHOOK_URL="http://alerts.example.com"))
+        self.assertTrue(any("ALERT_WEBHOOK_URL" in error for error in webhook_errors))
 
     def test_backup_contains_consistent_database_and_media(self):
         with tempfile.TemporaryDirectory() as temporary:
