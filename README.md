@@ -35,6 +35,8 @@ Oluşturulan proje kayıtları, MP4 dosyaları ve SRT altyazıları `videoluk-da
 
 ## Üretim sunucusuna kurulum
 
+Önerilen başlangıç hedefi Hetzner Cloud Nuremberg bölgesinde Ubuntu 24.04 çalıştıran CX33'tür. Dört vCPU, 8 GB RAM ve 80 GB NVMe ilk kapalı beta için yeterlidir; GPU sürekli açık tutulmaz. Ayrıntılı seçim ve güvenlik adımları [deploy/HETZNER.md](deploy/HETZNER.md) dosyasındadır.
+
 Ubuntu/Debian tabanlı bir sunucuda Docker ve Docker Compose kurulduktan sonra:
 
 ```bash
@@ -43,6 +45,8 @@ cp .env.example .env
 cd deploy
 docker compose -f compose.production.yaml up -d --build
 ```
+
+Boş bir Ubuntu 24.04 sunucusunu Docker, güvenlik duvarı, fail2ban, otomatik güvenlik güncellemesi, swap ve Videoluk kullanıcısıyla hazırlamak için `root` hesabında `deploy/bootstrap-ubuntu.sh` çalıştırılabilir.
 
 `VIDEOLUK_DOMAIN` gerçek alan adına ayarlandığında Caddy TLS sertifikasını otomatik yönetir. DNS kaydının sunucu IP adresine yönlenmiş, 80 ve 443 portlarının açık olması gerekir. Uygulama container'ı dışarıya doğrudan açılmaz; yalnızca Caddy üzerinden erişilir.
 

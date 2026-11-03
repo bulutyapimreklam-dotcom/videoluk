@@ -22,6 +22,11 @@ backup_data = load_script("backup_data")
 
 
 class OperationsTests(unittest.TestCase):
+    def test_ubuntu_bootstrap_has_required_hardening(self):
+        script = (ROOT / "deploy" / "bootstrap-ubuntu.sh").read_text(encoding="utf-8")
+        for requirement in ("set -euo pipefail", "ufw default deny incoming", "fail2ban", "unattended-upgrades", "docker-ce", "chmod 600 /swapfile"):
+            self.assertIn(requirement, script)
+
     def test_production_environment_validation(self):
         valid = {
             "VIDEOLUK_DOMAIN": "app.videoluk.com",
