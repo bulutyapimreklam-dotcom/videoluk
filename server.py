@@ -10,6 +10,7 @@ import json
 import hashlib
 import html
 import mimetypes
+import math
 import os
 import base64
 import binascii
@@ -68,6 +69,7 @@ MAX_UPLOAD_BYTES = int(os.getenv("VIDEOLUK_MAX_UPLOAD_BYTES", str(500 * 1024 * 1
 MAX_PROJECTS_PER_USER = max(1, int(os.getenv("VIDEOLUK_MAX_PROJECTS_PER_USER", "50")))
 MAX_STORAGE_BYTES_PER_USER = max(MAX_UPLOAD_BYTES, int(os.getenv("VIDEOLUK_MAX_STORAGE_BYTES_PER_USER", str(5 * 1024 * 1024 * 1024))))
 MAX_MONTHLY_RENDERS_PER_USER = max(1, int(os.getenv("VIDEOLUK_MAX_MONTHLY_RENDERS_PER_USER", "60")))
+STARTER_CREDITS = max(0, int(os.getenv("VIDEOLUK_STARTER_CREDITS", "120")))
 RENDER_WORKERS = max(1, min(4, int(os.getenv("VIDEOLUK_RENDER_WORKERS", "1"))))
 MAX_QUEUED_RENDERS = max(1, int(os.getenv("VIDEOLUK_MAX_QUEUED_RENDERS", "8")))
 ALLOWED_ORIGIN = os.getenv("VIDEOLUK_ALLOWED_ORIGIN", "").rstrip("/")
@@ -205,6 +207,16 @@ def initialize() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
+            CREATE TABLE IF NOT EXISTS credit_transactions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                transaction_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             """
         )
         project_columns = {row["name"] for row in connection.execute("PRAGMA table_info(projects)").fetchall()}
@@ -225,6 +237,13 @@ def initialize() -> None:
                 connection.execute(
                     "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (str(uuid.uuid4()), ADMIN_EMAIL, "Videoluk Yöneticisi", hash_password(ADMIN_PASSWORD), "owner", timestamp, timestamp),
+                )
+        for user_row in connection.execute("SELECT id FROM users").fetchall():
+            has_credits = connection.execute("SELECT 1 FROM credit_transactions WHERE user_id = ? LIMIT 1", (user_row["id"],)).fetchone()
+            if not has_credits and STARTER_CREDITS:
+                connection.execute(
+                    "INSERT INTO credit_transactions VALUES (?, ?, ?, 'starter', ?, ?, ?)",
+                    (str(uuid.uuid4()), user_row["id"], STARTER_CREDITS, "Başlangıç kredisi", "{}", now()),
                 )
         profile_count = connection.execute("SELECT COUNT(*) AS total FROM editing_profiles").fetchone()["total"]
         if not profile_count:
@@ -418,13 +437,46 @@ def user_usage(user_id: str) -> dict:
             "SELECT COALESCE(SUM(value), 0) AS total FROM usage_events WHERE user_id = ? AND event_type = 'render_seconds' AND created_at >= ?",
             (user_id, month_start()),
         ).fetchone()["total"])
+        credits = int(connection.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM credit_transactions WHERE user_id = ?", (user_id,)).fetchone()["total"])
     return {
         "projects": {"used": projects, "limit": MAX_PROJECTS_PER_USER},
         "storage": {"usedBytes": storage, "limitBytes": MAX_STORAGE_BYTES_PER_USER},
         "renders": {"used": renders, "limit": MAX_MONTHLY_RENDERS_PER_USER},
         "renderedSeconds": round(rendered_seconds, 1),
+        "credits": credits,
         "periodStartsAt": month_start(),
     }
+
+
+def estimate_project_cost(payload: dict) -> dict:
+    duration = max(3, min(300, int(payload.get("duration", 30))))
+    scenes = payload.get("scenes") if isinstance(payload.get("scenes"), list) else []
+    source = str(payload.get("source") or "").casefold()
+    render_credits = max(1, math.ceil(duration / 15))
+    voice_credits = max(1, math.ceil(duration / 30))
+    ai_credits = len(scenes) * 2 if "yapay" in source else 0
+    total = render_credits + voice_credits + ai_credits
+    return {
+        "totalCredits": total,
+        "breakdown": {"render": render_credits, "voice": voice_credits, "aiMedia": ai_credits},
+        "duration": duration,
+        "sceneCount": len(scenes),
+    }
+
+
+def render_credit_cost(user_id: str, job_id: str) -> int:
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT amount, metadata FROM credit_transactions WHERE user_id = ? AND transaction_type = 'render' ORDER BY created_at DESC",
+            (user_id,),
+        ).fetchall()
+    for row in rows:
+        try:
+            if json.loads(row["metadata"] or "{}").get("jobId") == job_id:
+                return abs(int(row["amount"]))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return 0
 
 
 def srt_time(seconds: float) -> str:
@@ -1178,6 +1230,19 @@ def render(job_id: str, project: dict) -> None:
     except Exception as exc:
         traceback.print_exc()
         update_job(job_id, status="failed", error=str(exc), progress=0)
+        refund = int(project.get("credit_cost") or 0)
+        refund_user = project.get("user_id")
+        if refund and refund_user:
+            with DB_LOCK, db() as connection:
+                already_refunded = connection.execute(
+                    "SELECT 1 FROM credit_transactions WHERE user_id = ? AND transaction_type = 'refund' AND metadata LIKE ? LIMIT 1",
+                    (refund_user, f'%"jobId": "{job_id}"%'),
+                ).fetchone()
+                if not already_refunded:
+                    connection.execute(
+                        "INSERT INTO credit_transactions VALUES (?, ?, ?, 'refund', ?, ?, ?)",
+                        (str(uuid.uuid4()), refund_user, refund, "Başarısız render iadesi", json.dumps({"jobId": job_id}), now()),
+                    )
 
 
 def submit_render(job_id: str, project: dict) -> None:
@@ -1201,7 +1266,10 @@ def resume_incomplete_renders() -> int:
             (now(),),
         )
     for row in rows[:MAX_QUEUED_RENDERS]:
-        submit_render(row["job_id"], {"id": row["project_id"], "payload": json.loads(row["payload"]), "user_id": row["user_id"]})
+        submit_render(row["job_id"], {
+            "id": row["project_id"], "payload": json.loads(row["payload"]), "user_id": row["user_id"],
+            "credit_cost": render_credit_cost(row["user_id"], row["job_id"]),
+        })
     for row in rows[MAX_QUEUED_RENDERS:]:
         update_job(row["job_id"], status="failed", error="Render kuyruğu sınırı aşıldı", progress=0)
     return min(len(rows), MAX_QUEUED_RENDERS)
@@ -1424,6 +1492,11 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 self.receive_training_video(params.get("profileId", ["default"])[0])
                 return
             body = self.read_json()
+            if route == "/api/cost-estimate":
+                estimate = estimate_project_cost(body)
+                estimate["availableCredits"] = user_usage(user["id"])["credits"]
+                self.send_json(HTTPStatus.OK, estimate)
+                return
             if route == "/api/scripts/generate":
                 self.send_json(HTTPStatus.OK, generate_ai_script(body))
                 return
@@ -1571,11 +1644,24 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                     if not row:
                         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Proje bulunamadı"})
                         return
+                    project_payload = json.loads(row["payload"])
+                    estimate = estimate_project_cost(project_payload)
+                    balance = int(connection.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM credit_transactions WHERE user_id = ?", (user["id"],)).fetchone()["total"])
+                    if balance < estimate["totalCredits"]:
+                        self.send_json(HTTPStatus.PAYMENT_REQUIRED, {
+                            "error": f"Bu işlem {estimate['totalCredits']} kredi gerektiriyor; bakiyende {balance} kredi var.",
+                            "requiredCredits": estimate["totalCredits"], "availableCredits": balance,
+                        })
+                        return
                     connection.execute(
                         "INSERT INTO render_jobs (id, project_id, status, progress, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                         (job_id, project_id, "queued", 0, timestamp, timestamp),
                     )
-                project = {"id": row["id"], "payload": json.loads(row["payload"]), "user_id": row["user_id"]}
+                    connection.execute(
+                        "INSERT INTO credit_transactions VALUES (?, ?, ?, 'render', ?, ?, ?)",
+                        (str(uuid.uuid4()), user["id"], -estimate["totalCredits"], "Video üretimi", json.dumps({"jobId": job_id, "projectId": project_id, "estimate": estimate}), timestamp),
+                    )
+                project = {"id": row["id"], "payload": project_payload, "user_id": row["user_id"], "credit_cost": estimate["totalCredits"]}
                 submit_render(job_id, project)
                 self.send_json(HTTPStatus.ACCEPTED, {"id": job_id, "status": "queued", "progress": 0})
                 return

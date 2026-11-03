@@ -230,9 +230,17 @@ class VideolukCoreTests(unittest.TestCase):
                 self.assertEqual(2048, usage["storage"]["usedBytes"])
                 self.assertEqual(1, usage["renders"]["used"])
                 self.assertEqual(30, usage["renderedSeconds"])
+                self.assertEqual(server.STARTER_CREDITS, usage["credits"])
         finally:
             for name, value in originals.items():
                 setattr(server, name, value)
+
+    def test_project_cost_estimate_distinguishes_stock_and_ai(self):
+        stock = server.estimate_project_cost({"duration": 30, "source": "Stok görüntü", "scenes": [{}, {}]})
+        ai = server.estimate_project_cost({"duration": 30, "source": "Yapay zekâ", "scenes": [{}, {}]})
+        self.assertEqual(3, stock["totalCredits"])
+        self.assertEqual(7, ai["totalCredits"])
+        self.assertEqual(4, ai["breakdown"]["aiMedia"])
 
 
 if __name__ == "__main__":

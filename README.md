@@ -69,6 +69,8 @@ Render motoru varsayılan olarak bir işi aynı anda çalıştırır ve en fazla
 
 Maliyet kontrolü için kullanıcı başına proje, depolama ve aylık render kotaları uygulanır. Varsayılan değerler 50 proje, 5 GB medya ve ayda 60 renderdır. Proje kütüphanesi bu kullanımı görsel olarak gösterir. Limitler `VIDEOLUK_MAX_PROJECTS_PER_USER`, `VIDEOLUK_MAX_STORAGE_BYTES_PER_USER` ve `VIDEOLUK_MAX_MONTHLY_RENDERS_PER_USER` değişkenleriyle paket veya sunucu kapasitesine göre ayarlanabilir.
 
+Her hesap başlangıçta varsayılan 120 kredi alır. Render öncesinde video süresi, seslendirme ve yapay zekâ sahne sayısına göre tahmini kredi maliyeti gösterilir; kullanıcı onayladığında kredi hareketi değişmez bir işlem kaydı olarak saklanır. Başarısız renderın kredisi otomatik iade edilir. Başlangıç bakiyesi `VIDEOLUK_STARTER_CREDITS` ile ayarlanabilir. Ödeme sağlayıcısı daha sonra yalnızca pozitif kredi hareketi oluşturan katman olarak bağlanacaktır.
+
 Sağlık kontrolü:
 
 ```bash
@@ -126,6 +128,7 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `GET /api/projects`
 - `GET /api/projects/:id`
 - `GET /api/usage`
+- `POST /api/cost-estimate`
 - `POST /api/projects/:id/duplicate`
 - `DELETE /api/projects/:id`
 - `POST /api/renders`
