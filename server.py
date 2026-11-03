@@ -473,6 +473,36 @@ def user_usage(user_id: str) -> dict:
     }
 
 
+def admin_overview() -> dict:
+    with db() as connection:
+        metrics = {
+            "users": int(connection.execute("SELECT COUNT(*) AS total FROM users WHERE password_hash != 'disabled'").fetchone()["total"]),
+            "projects": int(connection.execute("SELECT COUNT(*) AS total FROM projects").fetchone()["total"]),
+            "storageBytes": int(connection.execute("SELECT COALESCE(SUM(size_bytes), 0) AS total FROM media_assets").fetchone()["total"]),
+            "rendersCompleted": int(connection.execute("SELECT COUNT(*) AS total FROM render_jobs WHERE status = 'completed'").fetchone()["total"]),
+            "rendersActive": int(connection.execute("SELECT COUNT(*) AS total FROM render_jobs WHERE status IN ('queued', 'rendering')").fetchone()["total"]),
+            "revenueTry": float(connection.execute("SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) AS total FROM payment_orders WHERE status = 'paid'").fetchone()["total"]),
+        }
+        users = connection.execute(
+            "SELECT users.id, users.email, users.name, users.role, users.created_at, "
+            "(SELECT COUNT(*) FROM projects WHERE projects.user_id = users.id) AS project_count, "
+            "(SELECT COALESCE(SUM(size_bytes), 0) FROM media_assets WHERE media_assets.user_id = users.id) AS storage_bytes, "
+            "(SELECT COALESCE(SUM(amount), 0) FROM credit_transactions WHERE credit_transactions.user_id = users.id) AS credits "
+            "FROM users WHERE password_hash != 'disabled' ORDER BY users.created_at DESC LIMIT 100"
+        ).fetchall()
+        payments = connection.execute(
+            "SELECT payment_orders.id, users.email, payment_orders.package_id, payment_orders.credits, payment_orders.amount, "
+            "payment_orders.currency, payment_orders.status, payment_orders.created_at "
+            "FROM payment_orders JOIN users ON users.id = payment_orders.user_id ORDER BY payment_orders.created_at DESC LIMIT 50"
+        ).fetchall()
+        renders = connection.execute(
+            "SELECT render_jobs.id, projects.title, users.email, render_jobs.status, render_jobs.progress, render_jobs.created_at "
+            "FROM render_jobs JOIN projects ON projects.id = render_jobs.project_id JOIN users ON users.id = projects.user_id "
+            "ORDER BY render_jobs.created_at DESC LIMIT 50"
+        ).fetchall()
+    return {"metrics": metrics, "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders]}
+
+
 def estimate_project_cost(payload: dict) -> dict:
     duration = max(3, min(300, int(payload.get("duration", 30))))
     scenes = payload.get("scenes") if isinstance(payload.get("scenes"), list) else []
@@ -1425,6 +1455,15 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "Oturum açmanız gerekiyor", "authRequired": True})
         return user
 
+    def require_owner(self) -> dict | None:
+        user = self.require_user()
+        if not user:
+            return None
+        if user.get("role") != "owner":
+            self.send_json(HTTPStatus.FORBIDDEN, {"error": "Bu alan yalnızca Videoluk yöneticisine açıktır"})
+            return None
+        return user
+
     def end_headers(self) -> None:
         origin = self.headers.get("Origin", "").rstrip("/")
         if ALLOWED_ORIGIN and origin == ALLOWED_ORIGIN:
@@ -1826,6 +1865,11 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             })
             return
         if route.startswith("/api/") and not self.require_user():
+            return
+        if route == "/api/admin/overview":
+            if not self.require_owner():
+                return
+            self.send_json(HTTPStatus.OK, admin_overview())
             return
         if route == "/api/editing-profiles":
             with db() as connection:

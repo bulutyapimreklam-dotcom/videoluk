@@ -242,6 +242,68 @@ class VideolukCoreTests(unittest.TestCase):
         self.assertEqual(7, ai["totalCredits"])
         self.assertEqual(4, ai["breakdown"]["aiMedia"])
 
+    def test_admin_overview_aggregates_operations_without_secrets(self):
+        originals = {
+            "DATA": server.DATA,
+            "OUTPUTS": server.OUTPUTS,
+            "VOICES": server.VOICES,
+            "MEDIA_CACHE": server.MEDIA_CACHE,
+            "GENERATED_IMAGES": server.GENERATED_IMAGES,
+            "TRAINING_VIDEOS": server.TRAINING_VIDEOS,
+            "UPLOADS": server.UPLOADS,
+            "DB_PATH": server.DB_PATH,
+        }
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root
+                server.OUTPUTS = root / "renders"
+                server.VOICES = root / "voices"
+                server.MEDIA_CACHE = root / "media-cache"
+                server.GENERATED_IMAGES = root / "generated-images"
+                server.TRAINING_VIDEOS = root / "training-videos"
+                server.UPLOADS = root / "uploads"
+                server.DB_PATH = root / "videoluk.db"
+                server.initialize()
+                stamp = server.now()
+                with server.db() as connection:
+                    connection.execute(
+                        "INSERT INTO users VALUES (?, ?, ?, ?, 'member', ?, ?)",
+                        ("member-1", "uye@example.com", "Üye", server.hash_password("guvenli-parola-123"), stamp, stamp),
+                    )
+                    connection.execute(
+                        "INSERT INTO projects (id, title, payload, created_at, updated_at, user_id) VALUES (?, ?, '{}', ?, ?, ?)",
+                        ("admin-project", "Yönetim Testi", stamp, stamp, "member-1"),
+                    )
+                    connection.execute(
+                        "INSERT INTO media_assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ("admin-media", "member-1", "test.mp4", "video", "video/mp4", "/tmp/test.mp4", None, 4096, stamp),
+                    )
+                    connection.execute(
+                        "INSERT INTO render_jobs (id, project_id, status, progress, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        ("admin-render", "admin-project", "completed", 100, stamp, stamp),
+                    )
+                    connection.execute(
+                        "INSERT INTO payment_orders VALUES (?, ?, 'iyzico', 'mini', 100, '199.00', 'TRY', NULL, 'payment-1', 'paid', NULL, ?, ?)",
+                        ("admin-payment", "member-1", stamp, stamp),
+                    )
+                    connection.execute(
+                        "INSERT INTO credit_transactions VALUES (?, ?, 100, 'purchase', 'Test', NULL, ?)",
+                        ("admin-credit", "member-1", stamp),
+                    )
+                overview = server.admin_overview()
+                self.assertEqual(1, overview["metrics"]["users"])
+                self.assertEqual(1, overview["metrics"]["projects"])
+                self.assertEqual(4096, overview["metrics"]["storageBytes"])
+                self.assertEqual(1, overview["metrics"]["rendersCompleted"])
+                self.assertEqual(199.0, overview["metrics"]["revenueTry"])
+                self.assertEqual(100, overview["users"][0]["credits"])
+                self.assertNotIn("password_hash", overview["users"][0])
+                self.assertNotIn("token", overview["payments"][0])
+        finally:
+            for name, value in originals.items():
+                setattr(server, name, value)
+
     def test_iyzico_callback_credits_order_only_once(self):
         originals = {"DATA": server.DATA, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH, "iyzico_request": server.iyzico_request}
         try:

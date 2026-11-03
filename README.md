@@ -121,6 +121,7 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `GET /api/auth/status`
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
+- `GET /api/admin/overview` (yalnızca `owner` rolü)
 - `POST /api/scripts/generate`
 - `GET /api/editing-profiles`
 - `POST /api/editing-profiles`
@@ -152,6 +153,8 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `GET /api/renders/:id`
 - `GET /api/renders/:id/download`
 - `GET /api/renders/:id/subtitles`
+
+Owner hesabı proje kütüphanesindeki **Yönetim** düğmesinden toplam kullanıcı, proje, depolama, render ve tahsilat özetini; son kullanıcıları, işleri ve ödemeleri görebilir. Yönetim API'si normal kullanıcılar için `403` döndürür ve parola, oturum ya da ödeme tokenı paylaşmaz.
 
 Render işleri arka planda FFmpeg ile yürütülür. Dikey, yatay ve kare 1080p çıktı desteklenir.
 
