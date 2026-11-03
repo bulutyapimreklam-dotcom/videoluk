@@ -198,6 +198,42 @@ class VideolukCoreTests(unittest.TestCase):
             for name, value in originals.items():
                 setattr(server, name, value)
 
+    def test_user_usage_counts_projects_storage_and_monthly_renders(self):
+        originals = {"DATA": server.DATA, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH}
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root
+                server.UPLOADS = root / "uploads"
+                server.DB_PATH = root / "videoluk.db"
+                server.initialize()
+                stamp = server.now()
+                with server.db() as connection:
+                    connection.execute(
+                        "INSERT INTO projects (id, title, payload, created_at, updated_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        ("quota-project", "Kota", "{}", stamp, stamp, server.LOCAL_USER_ID),
+                    )
+                    connection.execute(
+                        "INSERT INTO media_assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ("quota-media", server.LOCAL_USER_ID, "test.mp4", "video", "video/mp4", "/tmp/test.mp4", None, 2048, stamp),
+                    )
+                    connection.execute(
+                        "INSERT INTO render_jobs (id, project_id, status, progress, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        ("quota-render", "quota-project", "completed", 100, stamp, stamp),
+                    )
+                    connection.execute(
+                        "INSERT INTO usage_events VALUES (?, ?, ?, ?, ?, ?)",
+                        ("quota-event", server.LOCAL_USER_ID, "render_seconds", 30, "{}", stamp),
+                    )
+                usage = server.user_usage(server.LOCAL_USER_ID)
+                self.assertEqual(1, usage["projects"]["used"])
+                self.assertEqual(2048, usage["storage"]["usedBytes"])
+                self.assertEqual(1, usage["renders"]["used"])
+                self.assertEqual(30, usage["renderedSeconds"])
+        finally:
+            for name, value in originals.items():
+                setattr(server, name, value)
+
 
 if __name__ == "__main__":
     unittest.main()

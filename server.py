@@ -65,6 +65,9 @@ PEXELS_API_KEY = os.getenv("VIDEOLUK_PEXELS_API_KEY", "")
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
 MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
 MAX_UPLOAD_BYTES = int(os.getenv("VIDEOLUK_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
+MAX_PROJECTS_PER_USER = max(1, int(os.getenv("VIDEOLUK_MAX_PROJECTS_PER_USER", "50")))
+MAX_STORAGE_BYTES_PER_USER = max(MAX_UPLOAD_BYTES, int(os.getenv("VIDEOLUK_MAX_STORAGE_BYTES_PER_USER", str(5 * 1024 * 1024 * 1024))))
+MAX_MONTHLY_RENDERS_PER_USER = max(1, int(os.getenv("VIDEOLUK_MAX_MONTHLY_RENDERS_PER_USER", "60")))
 RENDER_WORKERS = max(1, min(4, int(os.getenv("VIDEOLUK_RENDER_WORKERS", "1"))))
 MAX_QUEUED_RENDERS = max(1, int(os.getenv("VIDEOLUK_MAX_QUEUED_RENDERS", "8")))
 ALLOWED_ORIGIN = os.getenv("VIDEOLUK_ALLOWED_ORIGIN", "").rstrip("/")
@@ -190,6 +193,15 @@ def initialize() -> None:
                 file_path TEXT NOT NULL,
                 thumbnail_path TEXT,
                 size_bytes INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                value REAL NOT NULL DEFAULT 1,
+                metadata TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
@@ -386,6 +398,33 @@ def active_render_count() -> int:
             "SELECT COUNT(*) AS total FROM render_jobs WHERE status IN ('queued', 'rendering')"
         ).fetchone()
     return int(row["total"])
+
+
+def month_start() -> str:
+    current = datetime.now(timezone.utc)
+    return current.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+
+def user_usage(user_id: str) -> dict:
+    with db() as connection:
+        projects = int(connection.execute("SELECT COUNT(*) AS total FROM projects WHERE user_id = ?", (user_id,)).fetchone()["total"])
+        storage = int(connection.execute("SELECT COALESCE(SUM(size_bytes), 0) AS total FROM media_assets WHERE user_id = ?", (user_id,)).fetchone()["total"])
+        renders = int(connection.execute(
+            "SELECT COUNT(*) AS total FROM render_jobs JOIN projects ON projects.id = render_jobs.project_id "
+            "WHERE projects.user_id = ? AND render_jobs.created_at >= ? AND render_jobs.status != 'failed'",
+            (user_id, month_start()),
+        ).fetchone()["total"])
+        rendered_seconds = float(connection.execute(
+            "SELECT COALESCE(SUM(value), 0) AS total FROM usage_events WHERE user_id = ? AND event_type = 'render_seconds' AND created_at >= ?",
+            (user_id, month_start()),
+        ).fetchone()["total"])
+    return {
+        "projects": {"used": projects, "limit": MAX_PROJECTS_PER_USER},
+        "storage": {"usedBytes": storage, "limitBytes": MAX_STORAGE_BYTES_PER_USER},
+        "renders": {"used": renders, "limit": MAX_MONTHLY_RENDERS_PER_USER},
+        "renderedSeconds": round(rendered_seconds, 1),
+        "periodStartsAt": month_start(),
+    }
 
 
 def srt_time(seconds: float) -> str:
@@ -1130,6 +1169,12 @@ def render(job_id: str, project: dict) -> None:
             progress=100,
             output_path=str(output_path),
         )
+        if user_id:
+            with DB_LOCK, db() as connection:
+                connection.execute(
+                    "INSERT INTO usage_events VALUES (?, ?, 'render_seconds', ?, ?, ?)",
+                    (str(uuid.uuid4()), user_id, duration, json.dumps({"jobId": job_id, "projectId": project.get("id")}), now()),
+                )
     except Exception as exc:
         traceback.print_exc()
         update_job(job_id, status="failed", error=str(exc), progress=0)
@@ -1293,6 +1338,8 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > MAX_UPLOAD_BYTES:
             raise ValueError("Dosya boş veya yükleme sınırını aşıyor")
+        if user_usage(user["id"])["storage"]["usedBytes"] + length > MAX_STORAGE_BYTES_PER_USER:
+            raise ValueError("Depolama kotan dolu. Kullanmadığın medyaları silerek yer açabilirsin")
         filename = " ".join(unquote(self.headers.get("X-File-Name", "medya-dosyasi")).split())[:180]
         kind = str(self.headers.get("X-Media-Kind", "")).lower()
         if kind not in UPLOAD_EXTENSIONS:
@@ -1462,6 +1509,10 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                     collision = connection.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone()
                     if collision and not exists:
                         project_id = str(uuid.uuid4())
+                    if not exists:
+                        project_total = connection.execute("SELECT COUNT(*) AS total FROM projects WHERE user_id = ?", (user["id"],)).fetchone()["total"]
+                        if project_total >= MAX_PROJECTS_PER_USER:
+                            raise ValueError("Proje kotan dolu. Yeni proje açmak için eski bir projeyi silebilirsin")
                     if exists:
                         connection.execute(
                             "UPDATE projects SET title = ?, payload = ?, updated_at = ? WHERE id = ? AND user_id = ?",
@@ -1483,6 +1534,9 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                     if not row:
                         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Proje bulunamadı"})
                         return
+                    project_total = connection.execute("SELECT COUNT(*) AS total FROM projects WHERE user_id = ?", (user["id"],)).fetchone()["total"]
+                    if project_total >= MAX_PROJECTS_PER_USER:
+                        raise ValueError("Proje kotan dolu. Çoğaltmak için eski bir projeyi silebilirsin")
                     duplicate_id = str(uuid.uuid4())
                     timestamp = now()
                     payload = json.loads(row["payload"])
@@ -1499,6 +1553,9 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 project_id = str(body.get("projectId") or "")
                 job_id = str(uuid.uuid4())
                 timestamp = now()
+                if user_usage(user["id"])["renders"]["used"] >= MAX_MONTHLY_RENDERS_PER_USER:
+                    self.send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Aylık render kotan doldu. Yeni dönem başladığında tekrar render alabilirsin."})
+                    return
                 with DB_LOCK, db() as connection:
                     active = connection.execute(
                         "SELECT COUNT(*) AS total FROM render_jobs WHERE status IN ('queued', 'rendering')"
@@ -1574,6 +1631,9 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                     (self.current_user()["id"],),
                 ).fetchall()
             self.send_json(HTTPStatus.OK, {"projects": [dict(row) for row in rows]})
+            return
+        if route == "/api/usage":
+            self.send_json(HTTPStatus.OK, user_usage(self.current_user()["id"]))
             return
         if route.startswith("/api/projects/"):
             project_id = route.rsplit("/", 1)[-1]

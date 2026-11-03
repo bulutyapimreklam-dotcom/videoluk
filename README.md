@@ -67,6 +67,8 @@ VIDEOLUK_SECURE_COOKIES=1
 
 Render motoru varsayılan olarak bir işi aynı anda çalıştırır ve en fazla sekiz işi kuyruğa alır. Uygun CPU kapasitesi varsa `.env` içinde `VIDEOLUK_RENDER_WORKERS` artırılabilir. Sunucu yeniden başladığında `queued` veya `rendering` durumunda kalan işler otomatik olarak güvenli biçimde yeniden kuyruğa alınır.
 
+Maliyet kontrolü için kullanıcı başına proje, depolama ve aylık render kotaları uygulanır. Varsayılan değerler 50 proje, 5 GB medya ve ayda 60 renderdır. Proje kütüphanesi bu kullanımı görsel olarak gösterir. Limitler `VIDEOLUK_MAX_PROJECTS_PER_USER`, `VIDEOLUK_MAX_STORAGE_BYTES_PER_USER` ve `VIDEOLUK_MAX_MONTHLY_RENDERS_PER_USER` değişkenleriyle paket veya sunucu kapasitesine göre ayarlanabilir.
+
 Sağlık kontrolü:
 
 ```bash
@@ -123,6 +125,7 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `POST /api/projects`
 - `GET /api/projects`
 - `GET /api/projects/:id`
+- `GET /api/usage`
 - `POST /api/projects/:id/duplicate`
 - `DELETE /api/projects/:id`
 - `POST /api/renders`
