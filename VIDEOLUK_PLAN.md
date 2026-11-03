@@ -161,6 +161,8 @@ Kredi paketleri, abonelik, ekip çalışma alanı, marka kiti, şablonlar, kulla
 - Geri al/ileri al, tarayıcı taslağı ve SQLite sunucu otomatik kaydı
 - Güvenli kullanıcı girişi, HttpOnly oturum ve kullanıcıya özel proje kütüphanesi
 - Proje açma, sunucuda güncelleme, çoğaltma ve render dosyalarıyla birlikte silme
+- Kullanıcıya özel görsel/video/logo/müzik kütüphanesi, güvenli dosya doğrulaması ve sahneye atama
+- Timeline müzik kanalı, ses seviyesi ve seslendirmeyle FFmpeg miksleme
 - Altyazı açma/kapama, stil ve konumun gerçek rendera aktarılması
 - Kuyruklu FFmpeg render, yeniden başlatma kurtarması, MP4 ve SRT indirme
 - Docker/Caddy üretim paketi, özel beta erişim koruması ve GitHub doğrulama hattı

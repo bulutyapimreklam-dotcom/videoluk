@@ -95,6 +95,8 @@ Sahne oluşturma artık seçilen kaynağa göre medyayı otomatik hazırlar. **S
 
 Seslendirme sunucuda üretilir. macOS geliştirme ortamında sistemdeki `say`, Docker imajında ise açık kaynak `espeak-ng` kullanılır. Üretilen WAV dosyası proje renderına otomatik eklenir.
 
+Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM ve MKV dosyaları yükleyebilir; yüklemeler yalnızca kendi hesaplarına görünür ve sahnelere atanabilir. MP3, WAV, M4A, AAC, OGG ve FLAC müzikler timeline'daki müzik kanalına eklenir, ses seviyesi seçilir ve seslendirmeyle FFmpeg üzerinde mikslenir. Dosyalar uzantının yanı sıra FFprobe ile içerik türü açısından da doğrulanır. Dosya başına varsayılan sınır 500 MB'dir; `VIDEOLUK_MAX_UPLOAD_BYTES` ile değiştirilebilir.
+
 ## API
 
 - `GET /api/health`
@@ -109,6 +111,11 @@ Seslendirme sunucuda üretilir. macOS geliştirme ortamında sistemdeki `say`, D
 - `POST /api/training-videos?profileId=:id`
 - `POST /api/training/apply`
 - `GET /api/media/search`
+- `POST /api/uploads`
+- `GET /api/uploads?kind=:kind`
+- `GET /api/uploads/:id`
+- `GET /api/uploads/:id/thumbnail`
+- `DELETE /api/uploads/:id`
 - `POST /api/voices/generate`
 - `GET /api/voices/:id`
 - `POST /api/images/generate`
@@ -125,12 +132,12 @@ Seslendirme sunucuda üretilir. macOS geliştirme ortamında sistemdeki `say`, D
 
 Render işleri arka planda FFmpeg ile yürütülür. Dikey, yatay ve kare 1080p çıktı desteklenir.
 
-Editör; sahne başlığı ve seslendirme metni düzenleme, görsel istemini değiştirme, seçili medyayı yeniden üretme, stoktan değiştirme, sahne bölme/çoğaltma/silme/sürükleyerek sıralama, hız değiştirme ve geri al/ileri al özelliklerini içerir. Taslak tarayıcıda otomatik saklanır. Altyazının açık/kapalı durumu, stili ve konumu sunucu renderına aktarılır.
+Editör; sahne başlığı ve seslendirme metni düzenleme, görsel istemini değiştirme, seçili medyayı yeniden üretme, stoktan veya kullanıcı kütüphanesinden değiştirme, sahne bölme/çoğaltma/silme/sürükleyerek sıralama, hız değiştirme, müzik seçme ve geri al/ileri al özelliklerini içerir. Taslak tarayıcıda otomatik saklanır. Altyazının açık/kapalı durumu, stili, konumu, müzik ve ses seviyesi sunucu renderına aktarılır.
 
 ## Beta güvenlik sınırları
 
 - API yalnızca aynı origin üzerinden erişime açıktır; ayrı bir web alanı kullanılacaksa `VIDEOLUK_ALLOWED_ORIGIN` açıkça tanımlanır.
-- JSON istek gövdeleri 1 MB, stok medya indirmeleri 200 MB, eğitim videosu başına yükleme varsayılan olarak 2 GB ile sınırlandırılır.
+- JSON istek gövdeleri 1 MB, stok medya indirmeleri 200 MB, kullanıcı medyası 500 MB ve eğitim videosu başına yükleme varsayılan olarak 2 GB ile sınırlandırılır.
 - Üretim trafiği Caddy HTTPS ve Basic Auth katmanından geçer.
 - Render paralelliği ve kuyruk uzunluğu ortam değişkenleriyle sınırlıdır.
 - API yanıtları önbelleğe alınmaz; iframe, kamera, mikrofon ve konum erişimi güvenlik başlıklarıyla kapatılır.

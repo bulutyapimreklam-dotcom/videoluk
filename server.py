@@ -40,6 +40,7 @@ OUTPUTS = DATA / "renders"
 VOICES = DATA / "voices"
 MEDIA_CACHE = DATA / "media-cache"
 GENERATED_IMAGES = DATA / "generated-images"
+UPLOADS = DATA / "uploads"
 TRAINING_VIDEOS = DATA / "training-videos"
 DB_PATH = DATA / "videoluk.db"
 FFMPEG = os.getenv("FFMPEG_BIN", "ffmpeg")
@@ -63,6 +64,7 @@ LOCAL_USER_ID = "local-owner"
 PEXELS_API_KEY = os.getenv("VIDEOLUK_PEXELS_API_KEY", "")
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
 MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
+MAX_UPLOAD_BYTES = int(os.getenv("VIDEOLUK_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
 RENDER_WORKERS = max(1, min(4, int(os.getenv("VIDEOLUK_RENDER_WORKERS", "1"))))
 MAX_QUEUED_RENDERS = max(1, int(os.getenv("VIDEOLUK_MAX_QUEUED_RENDERS", "8")))
 ALLOWED_ORIGIN = os.getenv("VIDEOLUK_ALLOWED_ORIGIN", "").rstrip("/")
@@ -104,6 +106,7 @@ def initialize() -> None:
     VOICES.mkdir(parents=True, exist_ok=True)
     MEDIA_CACHE.mkdir(parents=True, exist_ok=True)
     GENERATED_IMAGES.mkdir(parents=True, exist_ok=True)
+    UPLOADS.mkdir(parents=True, exist_ok=True)
     TRAINING_VIDEOS.mkdir(parents=True, exist_ok=True)
     with db() as connection:
         connection.executescript(
@@ -175,6 +178,18 @@ def initialize() -> None:
                 token_hash TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS media_assets (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                thumbnail_path TEXT,
+                size_bytes INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
@@ -875,7 +890,72 @@ def validate_stock_url(url: str) -> str:
     return url
 
 
-def download_stock_video(media: dict) -> Path:
+UPLOAD_EXTENSIONS = {
+    "image": {".jpg", ".jpeg", ".png", ".webp"},
+    "logo": {".jpg", ".jpeg", ".png", ".webp"},
+    "video": {".mp4", ".mov", ".m4v", ".webm", ".mkv"},
+    "audio": {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"},
+}
+
+
+def validate_uploaded_media(path: Path, kind: str) -> None:
+    result = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "stream=codec_type", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise ValueError("Yüklenen medya dosyası okunamadı")
+    streams = json.loads(result.stdout or "{}").get("streams") or []
+    stream_types = {stream.get("codec_type") for stream in streams}
+    expected = "audio" if kind == "audio" else "video"
+    if expected not in stream_types:
+        raise ValueError("Dosya içeriği seçilen medya türüyle uyuşmuyor")
+
+
+def create_upload_thumbnail(source: Path, kind: str, target: Path) -> Path | None:
+    if kind == "audio":
+        return None
+    command = [FFMPEG, "-y"]
+    if kind in {"image", "logo"}:
+        command += ["-i", str(source)]
+    else:
+        command += ["-ss", "0.1", "-i", str(source)]
+    command += ["-frames:v", "1", "-vf", "scale=480:-2:force_original_aspect_ratio=decrease", "-q:v", "4", str(target)]
+    run_ffmpeg(command)
+    return target if target.is_file() and target.stat().st_size > 512 else None
+
+
+def uploaded_asset(asset_id: str, user_id: str | None = None) -> dict | None:
+    query = "SELECT * FROM media_assets WHERE id = ?"
+    params: tuple = (asset_id,)
+    if user_id:
+        query += " AND user_id = ?"
+        params = (asset_id, user_id)
+    with db() as connection:
+        row = connection.execute(query, params).fetchone()
+    return dict(row) if row else None
+
+
+def media_asset_payload(row: dict) -> dict:
+    return {
+        "id": row["id"], "uploadId": row["id"], "filename": row["filename"],
+        "mediaType": row["kind"], "kind": row["kind"], "mimeType": row["mime_type"],
+        "size": row["size_bytes"], "creator": "Yüklediğin medya",
+        "thumbnail": f"/api/uploads/{row['id']}/thumbnail" if row.get("thumbnail_path") else None,
+        "videoUrl": f"/api/uploads/{row['id']}" if row["kind"] == "video" else None,
+        "imageUrl": f"/api/uploads/{row['id']}" if row["kind"] in {"image", "logo"} else None,
+        "audioUrl": f"/api/uploads/{row['id']}" if row["kind"] == "audio" else None,
+    }
+
+
+def download_stock_video(media: dict, user_id: str | None = None) -> Path:
+    upload_id = "".join(character for character in str(media.get("uploadId") or "") if character.isalnum() or character == "-")[:64]
+    if upload_id:
+        asset = uploaded_asset(upload_id, user_id)
+        path = Path(asset["file_path"]) if asset else Path("/")
+        if asset and path.is_file() and asset["kind"] in {"image", "logo", "video"}:
+            return path
+        raise ValueError("Yüklenen medya dosyası bulunamadı")
     asset_id = "".join(character for character in str(media.get("assetId") or "") if character.isalnum() or character == "-")[:64]
     if asset_id:
         local_image = GENERATED_IMAGES / f"{asset_id}.png"
@@ -933,7 +1013,7 @@ def build_scene_clip(source: Path | None, target: Path, width: int, height: int,
     run_ffmpeg(command)
 
 
-def build_scene_sequence(job_id: str, scenes: list[dict], duration: int, width: int, height: int, job_dir: Path) -> Path | None:
+def build_scene_sequence(job_id: str, scenes: list[dict], duration: int, width: int, height: int, job_dir: Path, user_id: str | None = None) -> Path | None:
     if not any(isinstance(scene.get("media"), dict) and (scene["media"].get("videoUrl") or scene["media"].get("imageUrl")) for scene in scenes):
         return None
     fallback_duration = duration / max(1, len(scenes))
@@ -942,7 +1022,7 @@ def build_scene_sequence(job_id: str, scenes: list[dict], duration: int, width: 
     clip_paths = []
     for index, scene in enumerate(scenes):
         media = scene.get("media") if isinstance(scene.get("media"), dict) else None
-        source = download_stock_video(media) if media and (media.get("videoUrl") or media.get("imageUrl")) else None
+        source = download_stock_video(media, user_id) if media and (media.get("videoUrl") or media.get("imageUrl")) else None
         scene_duration = max(0.25, float(scene.get("duration") or fallback_duration))
         target = clips_dir / f"scene-{index:03}.mp4"
         build_scene_clip(source, target, width, height, scene_duration, index)
@@ -977,7 +1057,8 @@ def render(job_id: str, project: dict) -> None:
 
         # Selected stock media is cached, normalized per scene and concatenated.
         # Projects without media keep the lightweight generated background.
-        sequence = build_scene_sequence(job_id, scenes, duration, width, height, job_dir)
+        user_id = project.get("user_id")
+        sequence = build_scene_sequence(job_id, scenes, duration, width, height, job_dir, user_id)
         escaped_srt = str(subtitle_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
         if sequence:
             video_filters = "format=yuv420p"
@@ -1011,6 +1092,12 @@ def render(job_id: str, project: dict) -> None:
         voice_id = str(payload.get("voiceId") or "")
         voice_path = VOICES / f"{voice_id}.wav"
         audio_input = str(voice_path) if voice_id and voice_path.is_file() else f"anullsrc=channel_layout=stereo:sample_rate=44100:d={duration}"
+        music_id = str(payload.get("musicId") or "")
+        music_asset = uploaded_asset(music_id, user_id) if music_id else None
+        music_path = Path(music_asset["file_path"]) if music_asset and music_asset["kind"] == "audio" else None
+        if music_path and not music_path.is_file():
+            music_path = None
+        music_volume = max(0.0, min(1.0, float(payload.get("musicVolume", 0.18))))
         command = [
             FFMPEG, "-y",
             *video_input,
@@ -1019,13 +1106,22 @@ def render(job_id: str, project: dict) -> None:
             command += ["-i", audio_input]
         else:
             command += ["-f", "lavfi", "-i", audio_input]
+        if music_path:
+            command += ["-stream_loop", "-1", "-i", str(music_path)]
+            fade_start = max(0.0, duration - 2.0)
+            filter_graph += (
+                f";[1:a]apad,atrim=0:{duration}[voice];"
+                f"[2:a]volume={music_volume:.3f},atrim=0:{duration},afade=t=out:st={fade_start:.3f}:d=2[music];"
+                "[voice][music]amix=inputs=2:duration=longest:normalize=0[a]"
+            )
         command += [
             "-filter_complex", filter_graph,
-            "-map", "[v]", "-map", "1:a",
+            "-map", "[v]", "-map", "[a]" if music_path else "1:a",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-af", "apad", "-c:a", "aac", "-b:a", "128k", "-t", str(duration), "-movflags", "+faststart",
-            str(output_path),
         ]
+        if not music_path:
+            command += ["-af", "apad"]
+        command += ["-c:a", "aac", "-b:a", "128k", "-t", str(duration), "-movflags", "+faststart", str(output_path)]
         update_job(job_id, progress=75 if sequence else 35)
         run_ffmpeg(command)
         update_job(
@@ -1047,7 +1143,7 @@ def resume_incomplete_renders() -> int:
     with DB_LOCK, db() as connection:
         rows = connection.execute(
             """
-            SELECT render_jobs.id AS job_id, projects.id AS project_id, projects.payload AS payload
+            SELECT render_jobs.id AS job_id, projects.id AS project_id, projects.payload AS payload, projects.user_id AS user_id
             FROM render_jobs
             JOIN projects ON projects.id = render_jobs.project_id
             WHERE render_jobs.status IN ('queued', 'rendering')
@@ -1060,7 +1156,7 @@ def resume_incomplete_renders() -> int:
             (now(),),
         )
     for row in rows[:MAX_QUEUED_RENDERS]:
-        submit_render(row["job_id"], {"id": row["project_id"], "payload": json.loads(row["payload"])})
+        submit_render(row["job_id"], {"id": row["project_id"], "payload": json.loads(row["payload"]), "user_id": row["user_id"]})
     for row in rows[MAX_QUEUED_RENDERS:]:
         update_job(row["job_id"], status="failed", error="Render kuyruğu sınırı aşıldı", progress=0)
     return min(len(rows), MAX_QUEUED_RENDERS)
@@ -1105,7 +1201,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         origin = self.headers.get("Origin", "").rstrip("/")
         if ALLOWED_ORIGIN and origin == ALLOWED_ORIGIN:
             self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Video-Name")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Video-Name, X-File-Name, X-Media-Kind")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Vary", "Origin")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1193,6 +1289,51 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             target.unlink(missing_ok=True)
             raise
 
+    def receive_media_upload(self, user: dict) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > MAX_UPLOAD_BYTES:
+            raise ValueError("Dosya boş veya yükleme sınırını aşıyor")
+        filename = " ".join(unquote(self.headers.get("X-File-Name", "medya-dosyasi")).split())[:180]
+        kind = str(self.headers.get("X-Media-Kind", "")).lower()
+        if kind not in UPLOAD_EXTENSIONS:
+            raise ValueError("Medya türü image, video, logo veya audio olmalı")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in UPLOAD_EXTENSIONS[kind]:
+            raise ValueError("Bu dosya uzantısı seçilen medya türü için desteklenmiyor")
+        asset_id = str(uuid.uuid4())
+        user_dir = UPLOADS / user["id"]
+        user_dir.mkdir(parents=True, exist_ok=True)
+        target = user_dir / f"{asset_id}{suffix}"
+        thumbnail = user_dir / f"{asset_id}-thumb.jpg"
+        remaining = length
+        try:
+            with target.open("wb") as output:
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("Dosya yüklemesi yarıda kesildi")
+                    output.write(chunk)
+                    remaining -= len(chunk)
+            validate_uploaded_media(target, kind)
+            thumbnail_path = create_upload_thumbnail(target, kind, thumbnail)
+            mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            row = {
+                "id": asset_id, "user_id": user["id"], "filename": filename, "kind": kind,
+                "mime_type": mime_type, "file_path": str(target),
+                "thumbnail_path": str(thumbnail_path) if thumbnail_path else None,
+                "size_bytes": target.stat().st_size, "created_at": now(),
+            }
+            with DB_LOCK, db() as connection:
+                connection.execute(
+                    "INSERT INTO media_assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    tuple(row[key] for key in ("id", "user_id", "filename", "kind", "mime_type", "file_path", "thumbnail_path", "size_bytes", "created_at")),
+                )
+            self.send_json(HTTPStatus.CREATED, media_asset_payload(row))
+        except Exception:
+            target.unlink(missing_ok=True)
+            thumbnail.unlink(missing_ok=True)
+            raise
+
     def do_POST(self) -> None:
         try:
             route = urlparse(self.path).path
@@ -1227,6 +1368,9 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 return
             user = self.require_user()
             if not user:
+                return
+            if route == "/api/uploads":
+                self.receive_media_upload(user)
                 return
             if route == "/api/training-videos":
                 params = parse_qs(urlparse(self.path).query)
@@ -1374,7 +1518,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                         "INSERT INTO render_jobs (id, project_id, status, progress, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                         (job_id, project_id, "queued", 0, timestamp, timestamp),
                     )
-                project = {"id": row["id"], "payload": json.loads(row["payload"])}
+                project = {"id": row["id"], "payload": json.loads(row["payload"]), "user_id": row["user_id"]}
                 submit_render(job_id, project)
                 self.send_json(HTTPStatus.ACCEPTED, {"id": job_id, "status": "queued", "progress": 0})
                 return
@@ -1452,6 +1596,19 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 return
             self.send_json(HTTPStatus.OK, training_summary(profile_id))
             return
+        if route == "/api/uploads":
+            params = parse_qs(urlparse(self.path).query)
+            kind = params.get("kind", [""])[0]
+            query = "SELECT * FROM media_assets WHERE user_id = ?"
+            values: list[object] = [self.current_user()["id"]]
+            if kind in UPLOAD_EXTENSIONS:
+                query += " AND kind = ?"
+                values.append(kind)
+            query += " ORDER BY created_at DESC LIMIT 100"
+            with db() as connection:
+                rows = connection.execute(query, values).fetchall()
+            self.send_json(HTTPStatus.OK, {"assets": [media_asset_payload(dict(row)) for row in rows]})
+            return
         if route == "/api/media/search":
             params = parse_qs(urlparse(self.path).query)
             query = params.get("q", [""])[0]
@@ -1473,6 +1630,28 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("Content-Length", str(path.stat().st_size))
+            self.end_headers()
+            with path.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile)
+            return
+        if route.startswith("/api/uploads/"):
+            parts = route.strip("/").split("/")
+            asset_id = parts[2] if len(parts) >= 3 else ""
+            asset = uploaded_asset(asset_id, self.current_user()["id"])
+            if not asset:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            thumbnail_request = len(parts) == 4 and parts[3] == "thumbnail"
+            path = Path(asset["thumbnail_path"] if thumbnail_request else asset["file_path"])
+            if not path.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            content_type = "image/jpeg" if thumbnail_request else asset["mime_type"]
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(path.stat().st_size))
+            self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{quote(asset['filename'])}")
+            self.send_header("Cache-Control", "private, max-age=3600")
             self.end_headers()
             with path.open("rb") as source:
                 shutil.copyfileobj(source, self.wfile)
@@ -1524,6 +1703,19 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             route = urlparse(self.path).path
             user = self.require_user()
             if not user:
+                return
+            if route.startswith("/api/uploads/"):
+                asset_id = route.rsplit("/", 1)[-1]
+                asset = uploaded_asset(asset_id, user["id"])
+                if not asset:
+                    self.send_json(HTTPStatus.NOT_FOUND, {"error": "Medya bulunamadı"})
+                    return
+                with DB_LOCK, db() as connection:
+                    connection.execute("DELETE FROM media_assets WHERE id = ? AND user_id = ?", (asset_id, user["id"]))
+                Path(asset["file_path"]).unlink(missing_ok=True)
+                if asset.get("thumbnail_path"):
+                    Path(asset["thumbnail_path"]).unlink(missing_ok=True)
+                self.send_json(HTTPStatus.OK, {"deleted": True, "id": asset_id})
                 return
             if not route.startswith("/api/projects/"):
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "Bilinmeyen uç nokta"})

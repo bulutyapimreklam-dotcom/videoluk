@@ -78,6 +78,7 @@ class VideolukCoreTests(unittest.TestCase):
             "VOICES": server.VOICES,
             "MEDIA_CACHE": server.MEDIA_CACHE,
             "GENERATED_IMAGES": server.GENERATED_IMAGES,
+            "UPLOADS": server.UPLOADS,
             "DB_PATH": server.DB_PATH,
             "submit_render": server.submit_render,
         }
@@ -90,6 +91,7 @@ class VideolukCoreTests(unittest.TestCase):
                 server.VOICES = root / "voices"
                 server.MEDIA_CACHE = root / "media-cache"
                 server.GENERATED_IMAGES = root / "generated-images"
+                server.UPLOADS = root / "uploads"
                 server.DB_PATH = root / "videoluk.db"
                 server.submit_render = lambda job_id, project: submitted.append((job_id, project))
                 server.initialize()
@@ -128,6 +130,7 @@ class VideolukCoreTests(unittest.TestCase):
             "MEDIA_CACHE": server.MEDIA_CACHE,
             "GENERATED_IMAGES": server.GENERATED_IMAGES,
             "TRAINING_VIDEOS": server.TRAINING_VIDEOS,
+            "UPLOADS": server.UPLOADS,
             "DB_PATH": server.DB_PATH,
         }
         try:
@@ -139,6 +142,7 @@ class VideolukCoreTests(unittest.TestCase):
                 server.MEDIA_CACHE = root / "media-cache"
                 server.GENERATED_IMAGES = root / "generated-images"
                 server.TRAINING_VIDEOS = root / "training-videos"
+                server.UPLOADS = root / "uploads"
                 server.DB_PATH = root / "videoluk.db"
                 server.initialize()
                 stamp = server.now()
@@ -170,6 +174,29 @@ class VideolukCoreTests(unittest.TestCase):
                     server.download_stock_video({"assetId": "missing"})
         finally:
             server.GENERATED_IMAGES = original
+
+    def test_uploaded_asset_is_scoped_to_owner(self):
+        originals = {"DATA": server.DATA, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH}
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root
+                server.UPLOADS = root / "uploads"
+                server.DB_PATH = root / "videoluk.db"
+                server.initialize()
+                asset = server.UPLOADS / "test.png"
+                asset.write_bytes(b"x" * 2048)
+                with server.db() as connection:
+                    connection.execute(
+                        "INSERT INTO media_assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ("upload-1", server.LOCAL_USER_ID, "test.png", "image", "image/png", str(asset), None, asset.stat().st_size, server.now()),
+                    )
+                self.assertEqual(asset, server.download_stock_video({"uploadId": "upload-1"}, server.LOCAL_USER_ID))
+                with self.assertRaises(ValueError):
+                    server.download_stock_video({"uploadId": "upload-1"}, "another-user")
+        finally:
+            for name, value in originals.items():
+                setattr(server, name, value)
 
 
 if __name__ == "__main__":
