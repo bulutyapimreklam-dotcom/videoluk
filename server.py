@@ -13,6 +13,8 @@ import mimetypes
 import os
 import base64
 import binascii
+import hmac
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 import shutil
 import sqlite3
@@ -21,8 +23,9 @@ import threading
 import traceback
 import uuid
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
@@ -51,6 +54,12 @@ IMAGE_URL = os.getenv("VIDEOLUK_IMAGE_URL", "").rstrip("/")
 IMAGE_MODEL = os.getenv("VIDEOLUK_IMAGE_MODEL", "")
 IMAGE_API_KEY = os.getenv("VIDEOLUK_IMAGE_API_KEY", "")
 IMAGE_TIMEOUT = int(os.getenv("VIDEOLUK_IMAGE_TIMEOUT", "180"))
+AUTH_REQUIRED = os.getenv("VIDEOLUK_AUTH_REQUIRED", "0").lower() in {"1", "true", "yes"}
+ADMIN_EMAIL = os.getenv("VIDEOLUK_ADMIN_EMAIL", "").strip().lower()
+ADMIN_PASSWORD = os.getenv("VIDEOLUK_ADMIN_PASSWORD", "")
+SECURE_COOKIES = os.getenv("VIDEOLUK_SECURE_COOKIES", "0").lower() in {"1", "true", "yes"}
+SESSION_TTL_DAYS = max(1, min(90, int(os.getenv("VIDEOLUK_SESSION_TTL_DAYS", "14"))))
+LOCAL_USER_ID = "local-owner"
 PEXELS_API_KEY = os.getenv("VIDEOLUK_PEXELS_API_KEY", "")
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
 MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
@@ -153,8 +162,43 @@ def initialize() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(profile_id) REFERENCES editing_profiles(id)
             );
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             """
         )
+        project_columns = {row["name"] for row in connection.execute("PRAGMA table_info(projects)").fetchall()}
+        if "user_id" not in project_columns:
+            connection.execute("ALTER TABLE projects ADD COLUMN user_id TEXT")
+        connection.execute("UPDATE projects SET user_id = ? WHERE user_id IS NULL OR user_id = ''", (LOCAL_USER_ID,))
+        local_user = connection.execute("SELECT id FROM users WHERE id = ?", (LOCAL_USER_ID,)).fetchone()
+        if not local_user:
+            timestamp = now()
+            connection.execute(
+                "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (LOCAL_USER_ID, "local@videoluk.internal", "Yerel Kullanıcı", "disabled", "owner", timestamp, timestamp),
+            )
+        if ADMIN_EMAIL and ADMIN_PASSWORD:
+            existing_admin = connection.execute("SELECT id FROM users WHERE email = ?", (ADMIN_EMAIL,)).fetchone()
+            if not existing_admin:
+                timestamp = now()
+                connection.execute(
+                    "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), ADMIN_EMAIL, "Videoluk Yöneticisi", hash_password(ADMIN_PASSWORD), "owner", timestamp, timestamp),
+                )
         profile_count = connection.execute("SELECT COUNT(*) AS total FROM editing_profiles").fetchone()["total"]
         if not profile_count:
             timestamp = now()
@@ -172,6 +216,46 @@ def initialize() -> None:
                 ("default", "Benim Kurgu DNA'm", "Kendi kurgu prensiplerinle doldurulacak ana profil.",
                  json.dumps(rules, ensure_ascii=False), timestamp, timestamp),
             )
+
+
+def hash_password(password: str) -> str:
+    if len(password) < 10:
+        raise ValueError("Parola en az 10 karakter olmalı")
+    salt = secrets.token_bytes(16)
+    iterations = 310_000
+    derived = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${base64.urlsafe_b64encode(salt).decode()}${base64.urlsafe_b64encode(derived).decode()}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, iteration_text, salt_text, digest_text = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        iterations = int(iteration_text)
+        salt = base64.urlsafe_b64decode(salt_text.encode())
+        expected = base64.urlsafe_b64decode(digest_text.encode())
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError, binascii.Error):
+        return False
+
+
+def session_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_session(user_id: str) -> tuple[str, str]:
+    token = secrets.token_urlsafe(32)
+    created_at = now()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)).isoformat()
+    with DB_LOCK, db() as connection:
+        connection.execute("DELETE FROM sessions WHERE expires_at <= ?", (created_at,))
+        connection.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+            (session_token_hash(token), user_id, expires_at, created_at),
+        )
+    return token, expires_at
 
 
 def update_training_video(video_id: str, **values: object) -> None:
@@ -986,7 +1070,36 @@ class VideolukHandler(SimpleHTTPRequestHandler):
     server_version = "Videoluk/0.1"
 
     def __init__(self, *args, **kwargs):
+        self._current_user_cache = None
         super().__init__(*args, directory=str(DIST), **kwargs)
+
+    def current_user(self) -> dict | None:
+        if self._current_user_cache is not None:
+            return self._current_user_cache
+        if not AUTH_REQUIRED:
+            with db() as connection:
+                row = connection.execute("SELECT id, email, name, role FROM users WHERE id = ?", (LOCAL_USER_ID,)).fetchone()
+            self._current_user_cache = dict(row) if row else None
+            return self._current_user_cache
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        morsel = cookie.get("videoluk_session")
+        if not morsel:
+            return None
+        token_hash = session_token_hash(morsel.value)
+        with db() as connection:
+            row = connection.execute(
+                "SELECT users.id, users.email, users.name, users.role FROM sessions "
+                "JOIN users ON users.id = sessions.user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ?",
+                (token_hash, now()),
+            ).fetchone()
+        self._current_user_cache = dict(row) if row else None
+        return self._current_user_cache
+
+    def require_user(self) -> dict | None:
+        user = self.current_user()
+        if not user:
+            self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "Oturum açmanız gerekiyor", "authRequired": True})
+        return user
 
     def end_headers(self) -> None:
         origin = self.headers.get("Origin", "").rstrip("/")
@@ -1017,12 +1130,14 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             raise ValueError("İstek çok büyük")
         return json.loads(self.rfile.read(length) or b"{}")
 
-    def send_json(self, status: int, payload: object) -> None:
+    def send_json(self, status: int, payload: object, extra_headers: dict[str, str] | None = None) -> None:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(encoded)))
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -1081,6 +1196,38 @@ class VideolukHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             route = urlparse(self.path).path
+            if route == "/api/auth/login":
+                body = self.read_json()
+                email = str(body.get("email") or "").strip().lower()[:254]
+                password = str(body.get("password") or "")
+                with db() as connection:
+                    row = connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+                if not row or not verify_password(password, row["password_hash"]):
+                    self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "E-posta veya parola hatalı"})
+                    return
+                token, expires_at = create_session(row["id"])
+                secure = "; Secure" if SECURE_COOKIES else ""
+                cookie = f"videoluk_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_DAYS * 86400}{secure}"
+                self.send_json(HTTPStatus.OK, {
+                    "authenticated": True,
+                    "user": {"id": row["id"], "email": row["email"], "name": row["name"], "role": row["role"]},
+                    "expiresAt": expires_at,
+                }, {"Set-Cookie": cookie})
+                return
+            if route == "/api/auth/logout":
+                cookie = SimpleCookie(self.headers.get("Cookie", ""))
+                morsel = cookie.get("videoluk_session")
+                if morsel:
+                    with DB_LOCK, db() as connection:
+                        connection.execute("DELETE FROM sessions WHERE token_hash = ?", (session_token_hash(morsel.value),))
+                secure = "; Secure" if SECURE_COOKIES else ""
+                self.send_json(HTTPStatus.OK, {"authenticated": False}, {
+                    "Set-Cookie": f"videoluk_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}"
+                })
+                return
+            user = self.require_user()
+            if not user:
+                return
             if route == "/api/training-videos":
                 params = parse_qs(urlparse(self.path).query)
                 self.receive_training_video(params.get("profileId", ["default"])[0])
@@ -1165,18 +1312,44 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 timestamp = now()
                 title = str(body.get("title") or "Adsız Videoluk Projesi")[:120]
                 with DB_LOCK, db() as connection:
-                    exists = connection.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone()
+                    exists = connection.execute(
+                        "SELECT id FROM projects WHERE id = ? AND user_id = ?", (project_id, user["id"])
+                    ).fetchone()
+                    collision = connection.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone()
+                    if collision and not exists:
+                        project_id = str(uuid.uuid4())
                     if exists:
                         connection.execute(
-                            "UPDATE projects SET title = ?, payload = ?, updated_at = ? WHERE id = ?",
-                            (title, json.dumps(body, ensure_ascii=False), timestamp, project_id),
+                            "UPDATE projects SET title = ?, payload = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                            (title, json.dumps(body, ensure_ascii=False), timestamp, project_id, user["id"]),
                         )
                     else:
                         connection.execute(
-                            "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
-                            (project_id, title, json.dumps(body, ensure_ascii=False), timestamp, timestamp),
+                            "INSERT INTO projects (id, title, payload, created_at, updated_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                            (project_id, title, json.dumps(body, ensure_ascii=False), timestamp, timestamp, user["id"]),
                         )
                 self.send_json(HTTPStatus.OK if exists else HTTPStatus.CREATED, {"id": project_id, "title": title, "saved": True})
+                return
+            if route.startswith("/api/projects/") and route.endswith("/duplicate"):
+                project_id = route.strip("/").split("/")[2]
+                with DB_LOCK, db() as connection:
+                    row = connection.execute(
+                        "SELECT * FROM projects WHERE id = ? AND user_id = ?", (project_id, user["id"])
+                    ).fetchone()
+                    if not row:
+                        self.send_json(HTTPStatus.NOT_FOUND, {"error": "Proje bulunamadı"})
+                        return
+                    duplicate_id = str(uuid.uuid4())
+                    timestamp = now()
+                    payload = json.loads(row["payload"])
+                    payload.pop("id", None)
+                    duplicate_title = f"{row['title']} · Kopya"[:120]
+                    payload["title"] = duplicate_title
+                    connection.execute(
+                        "INSERT INTO projects (id, title, payload, created_at, updated_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        (duplicate_id, duplicate_title, json.dumps(payload, ensure_ascii=False), timestamp, timestamp, user["id"]),
+                    )
+                self.send_json(HTTPStatus.CREATED, {"id": duplicate_id, "title": duplicate_title, "saved": True})
                 return
             if route == "/api/renders":
                 project_id = str(body.get("projectId") or "")
@@ -1191,7 +1364,9 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                             "error": "Render kuyruğu dolu. Lütfen mevcut işlerin tamamlanmasını bekleyin."
                         })
                         return
-                    row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+                    row = connection.execute(
+                        "SELECT * FROM projects WHERE id = ? AND user_id = ?", (project_id, user["id"])
+                    ).fetchone()
                     if not row:
                         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Proje bulunamadı"})
                         return
@@ -1222,7 +1397,20 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "imageModel": IMAGE_MODEL or None,
                 "stockProvider": "pexels" if PEXELS_API_KEY else None,
                 "voiceEngine": "system-tts" if shutil.which("say") or shutil.which("espeak-ng") else None,
+                "authRequired": AUTH_REQUIRED,
+                "authReady": bool(not AUTH_REQUIRED or (ADMIN_EMAIL and ADMIN_PASSWORD)),
             })
+            return
+        if route == "/api/auth/status":
+            user = self.current_user()
+            self.send_json(HTTPStatus.OK, {
+                "required": AUTH_REQUIRED,
+                "ready": bool(not AUTH_REQUIRED or (ADMIN_EMAIL and ADMIN_PASSWORD)),
+                "authenticated": bool(user),
+                "user": user,
+            })
+            return
+        if route.startswith("/api/") and not self.require_user():
             return
         if route == "/api/editing-profiles":
             with db() as connection:
@@ -1238,9 +1426,23 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         if route == "/api/projects":
             with db() as connection:
                 rows = connection.execute(
-                    "SELECT id, title, created_at, updated_at FROM projects ORDER BY updated_at DESC LIMIT 50"
+                    "SELECT id, title, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY updated_at DESC LIMIT 50",
+                    (self.current_user()["id"],),
                 ).fetchall()
             self.send_json(HTTPStatus.OK, {"projects": [dict(row) for row in rows]})
+            return
+        if route.startswith("/api/projects/"):
+            project_id = route.rsplit("/", 1)[-1]
+            with db() as connection:
+                row = connection.execute(
+                    "SELECT * FROM projects WHERE id = ? AND user_id = ?", (project_id, self.current_user()["id"])
+                ).fetchone()
+            if not row:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": "Proje bulunamadı"})
+                return
+            payload = json.loads(row["payload"])
+            payload.update({"id": row["id"], "title": row["title"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]})
+            self.send_json(HTTPStatus.OK, payload)
             return
         if route == "/api/training-videos":
             params = parse_qs(urlparse(self.path).query)
@@ -1296,7 +1498,10 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             parts = route.strip("/").split("/")
             job_id = parts[2] if len(parts) >= 3 else ""
             with db() as connection:
-                row = connection.execute("SELECT * FROM render_jobs WHERE id = ?", (job_id,)).fetchone()
+                row = connection.execute(
+                    "SELECT render_jobs.* FROM render_jobs JOIN projects ON projects.id = render_jobs.project_id "
+                    "WHERE render_jobs.id = ? AND projects.user_id = ?", (job_id, self.current_user()["id"])
+                ).fetchone()
             if not row:
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "Render işi bulunamadı"})
                 return
@@ -1313,6 +1518,40 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, payload)
             return
         super().do_GET()
+
+    def do_DELETE(self) -> None:
+        try:
+            route = urlparse(self.path).path
+            user = self.require_user()
+            if not user:
+                return
+            if not route.startswith("/api/projects/"):
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": "Bilinmeyen uç nokta"})
+                return
+            project_id = route.rsplit("/", 1)[-1]
+            with DB_LOCK, db() as connection:
+                row = connection.execute(
+                    "SELECT id FROM projects WHERE id = ? AND user_id = ?", (project_id, user["id"])
+                ).fetchone()
+                if not row:
+                    self.send_json(HTTPStatus.NOT_FOUND, {"error": "Proje bulunamadı"})
+                    return
+                active = connection.execute(
+                    "SELECT COUNT(*) AS total FROM render_jobs WHERE project_id = ? AND status IN ('queued', 'rendering')",
+                    (project_id,),
+                ).fetchone()["total"]
+                if active:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "Render devam ederken proje silinemez"})
+                    return
+                job_rows = connection.execute("SELECT id FROM render_jobs WHERE project_id = ?", (project_id,)).fetchall()
+                connection.execute("DELETE FROM render_jobs WHERE project_id = ?", (project_id,))
+                connection.execute("DELETE FROM projects WHERE id = ? AND user_id = ?", (project_id, user["id"]))
+            for job in job_rows:
+                shutil.rmtree(OUTPUTS / job["id"], ignore_errors=True)
+            self.send_json(HTTPStatus.OK, {"deleted": True, "id": project_id})
+        except Exception as exc:
+            traceback.print_exc()
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
 
 if __name__ == "__main__":

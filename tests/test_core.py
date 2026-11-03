@@ -7,6 +7,13 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_password_hash_is_salted_and_verifiable(self):
+        first = server.hash_password("uzun-guvenli-parola")
+        second = server.hash_password("uzun-guvenli-parola")
+        self.assertNotEqual(first, second)
+        self.assertTrue(server.verify_password("uzun-guvenli-parola", first))
+        self.assertFalse(server.verify_password("yanlis-parola", first))
+
     def test_local_script_has_distinct_scenes(self):
         result = server.generate_local_script({
             "idea": "Mahalle esnafı için teslimat uygulaması",
@@ -90,8 +97,8 @@ class VideolukCoreTests(unittest.TestCase):
                 payload = json.dumps({"duration": 3, "scenes": []})
                 with server.db() as connection:
                     connection.execute(
-                        "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
-                        ("project-1", "Test", payload, stamp, stamp),
+                        "INSERT INTO projects (id, title, payload, created_at, updated_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        ("project-1", "Test", payload, stamp, stamp, server.LOCAL_USER_ID),
                     )
                     for job_id, status in (("job-1", "queued"), ("job-2", "rendering"), ("job-3", "completed")):
                         connection.execute(
@@ -104,9 +111,11 @@ class VideolukCoreTests(unittest.TestCase):
                 self.assertEqual(["job-1", "job-2"], [item[0] for item in submitted])
                 with server.db() as connection:
                     states = dict(connection.execute("SELECT id, status FROM render_jobs"))
+                    owner = connection.execute("SELECT user_id FROM projects WHERE id = 'project-1'").fetchone()["user_id"]
                 self.assertEqual("queued", states["job-1"])
                 self.assertEqual("queued", states["job-2"])
                 self.assertEqual("completed", states["job-3"])
+                self.assertEqual(server.LOCAL_USER_ID, owner)
         finally:
             for name, value in originals.items():
                 setattr(server, name, value)

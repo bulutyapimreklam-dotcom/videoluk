@@ -52,7 +52,18 @@ docker compose -f compose.production.yaml up -d --build
 docker run --rm caddy:2-alpine caddy hash-password --plaintext 'uzun-ve-guclu-parolaniz'
 ```
 
-Bu koruma ilk özel beta içindir; uygulama internete parolasız açılmaz. İleride çok kullanıcılı hesap sistemi eklendiğinde Caddy katmanındaki geçici beta parolası kaldırılabilir.
+Bu dış koruma ilk özel beta içindir; uygulama internete parolasız açılmaz. Kullanıcı hesapları yeterince olgunlaştığında Caddy katmanındaki ortak beta parolası kaldırılabilir.
+
+Videoluk ayrıca uygulama içinde kullanıcıya özel oturum ve proje izolasyonu uygular. `.env` içinde aşağıdaki alanlar doldurulur:
+
+```env
+VIDEOLUK_AUTH_REQUIRED=1
+VIDEOLUK_ADMIN_EMAIL=yonetici@videoluk.com
+VIDEOLUK_ADMIN_PASSWORD=uzun-ve-benzersiz-bir-parola
+VIDEOLUK_SECURE_COOKIES=1
+```
+
+İlk yönetici hesabı sunucu ilk kez başlatıldığında oluşturulur. Parola PBKDF2-SHA256 ile rastgele tuz ve 310.000 iterasyon kullanılarak saklanır; düz parola veritabanına yazılmaz. Oturum çerezi `HttpOnly`, `SameSite=Strict` ve üretimde `Secure` olarak gönderilir. Her kullanıcı yalnızca kendi projelerini listeleyebilir, açabilir, güncelleyebilir, çoğaltabilir, render edebilir ve silebilir. Yerel geliştirmede `VIDEOLUK_AUTH_REQUIRED=0` kullanılır.
 
 Render motoru varsayılan olarak bir işi aynı anda çalıştırır ve en fazla sekiz işi kuyruğa alır. Uygun CPU kapasitesi varsa `.env` içinde `VIDEOLUK_RENDER_WORKERS` artırılabilir. Sunucu yeniden başladığında `queued` veya `rendering` durumunda kalan işler otomatik olarak güvenli biçimde yeniden kuyruğa alınır.
 
@@ -87,6 +98,9 @@ Seslendirme sunucuda üretilir. macOS geliştirme ortamında sistemdeki `say`, D
 ## API
 
 - `GET /api/health`
+- `GET /api/auth/status`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
 - `POST /api/scripts/generate`
 - `GET /api/editing-profiles`
 - `POST /api/editing-profiles`
@@ -100,6 +114,10 @@ Seslendirme sunucuda üretilir. macOS geliştirme ortamında sistemdeki `say`, D
 - `POST /api/images/generate`
 - `GET /api/images/:id`
 - `POST /api/projects`
+- `GET /api/projects`
+- `GET /api/projects/:id`
+- `POST /api/projects/:id/duplicate`
+- `DELETE /api/projects/:id`
 - `POST /api/renders`
 - `GET /api/renders/:id`
 - `GET /api/renders/:id/download`
