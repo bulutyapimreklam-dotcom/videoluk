@@ -210,6 +210,16 @@ def initialize() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
+            CREATE TABLE IF NOT EXISTS auth_tokens (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                purpose TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             CREATE TABLE IF NOT EXISTS media_assets (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -354,6 +364,58 @@ def create_session(user_id: str) -> tuple[str, str]:
             (session_token_hash(token), user_id, expires_at, created_at),
         )
     return token, expires_at
+
+
+def create_auth_token(user_id: str, purpose: str) -> dict:
+    if purpose not in {"invite", "reset"}:
+        raise ValueError("Geçersiz parola bağlantısı")
+    token = secrets.token_urlsafe(32)
+    created_at = now()
+    hours = 48 if purpose == "invite" else 2
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+    with DB_LOCK, db() as connection:
+        if not connection.execute("SELECT 1 FROM users WHERE id = ? AND password_hash != 'disabled'", (user_id,)).fetchone():
+            raise ValueError("Kullanıcı bulunamadı")
+        connection.execute("UPDATE auth_tokens SET used_at = ? WHERE user_id = ? AND purpose = ? AND used_at IS NULL", (created_at, user_id, purpose))
+        connection.execute(
+            "INSERT INTO auth_tokens VALUES (?, ?, ?, ?, ?, NULL, ?)",
+            (str(uuid.uuid4()), user_id, session_token_hash(token), purpose, expires_at, created_at),
+        )
+    return {"token": token, "purpose": purpose, "expiresAt": expires_at, "path": f"/?authToken={quote(token)}"}
+
+
+def inspect_auth_token(token: str) -> dict:
+    with db() as connection:
+        row = connection.execute(
+            "SELECT auth_tokens.purpose, auth_tokens.expires_at, auth_tokens.used_at, users.email, users.name "
+            "FROM auth_tokens JOIN users ON users.id = auth_tokens.user_id WHERE auth_tokens.token_hash = ?",
+            (session_token_hash(token),),
+        ).fetchone()
+    if not row or row["used_at"] or row["expires_at"] <= now():
+        raise ValueError("Bu bağlantı geçersiz veya süresi dolmuş")
+    return {"purpose": row["purpose"], "expiresAt": row["expires_at"], "email": row["email"], "name": row["name"]}
+
+
+def complete_auth_token(token: str, password: str) -> dict:
+    if len(password) < 10:
+        raise ValueError("Parola en az 10 karakter olmalı")
+    token_hash = session_token_hash(token)
+    with DB_LOCK, db() as connection:
+        row = connection.execute(
+            "SELECT auth_tokens.user_id, auth_tokens.purpose, auth_tokens.expires_at, auth_tokens.used_at, users.email, users.name "
+            "FROM auth_tokens JOIN users ON users.id = auth_tokens.user_id WHERE auth_tokens.token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if not row or row["used_at"] or row["expires_at"] <= now():
+            raise ValueError("Bu bağlantı geçersiz veya süresi dolmuş")
+        timestamp = now()
+        if row["purpose"] == "invite":
+            connection.execute("UPDATE users SET password_hash = ?, status = 'active', updated_at = ? WHERE id = ?", (hash_password(password), timestamp, row["user_id"]))
+        else:
+            connection.execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", (hash_password(password), timestamp, row["user_id"]))
+        connection.execute("UPDATE auth_tokens SET used_at = ? WHERE token_hash = ?", (timestamp, token_hash))
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (row["user_id"],))
+    return {"completed": True, "email": row["email"], "name": row["name"]}
 
 
 def update_training_video(video_id: str, **values: object) -> None:
@@ -519,23 +581,28 @@ def create_managed_user(payload: dict) -> dict:
         raise ValueError("Geçerli bir e-posta adresi gerekli")
     if len(name) < 2:
         raise ValueError("Kullanıcı adı en az 2 karakter olmalı")
-    if len(password) < 10:
+    if password and len(password) < 10:
         raise ValueError("Geçici parola en az 10 karakter olmalı")
     timestamp = now()
     user_id = str(uuid.uuid4())
     with DB_LOCK, db() as connection:
         if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
             raise ValueError("Bu e-posta adresi zaten kayıtlı")
+        status = "active" if password else "invited"
+        initial_password = password or secrets.token_urlsafe(32)
         connection.execute(
-            "INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at, status) VALUES (?, ?, ?, ?, 'member', ?, ?, 'active')",
-            (user_id, email, name, hash_password(password), timestamp, timestamp),
+            "INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at, status) VALUES (?, ?, ?, ?, 'member', ?, ?, ?)",
+            (user_id, email, name, hash_password(initial_password), timestamp, timestamp, status),
         )
         if STARTER_CREDITS:
             connection.execute(
                 "INSERT INTO credit_transactions VALUES (?, ?, ?, 'starter', 'Başlangıç kredisi', '{}', ?)",
                 (str(uuid.uuid4()), user_id, STARTER_CREDITS, timestamp),
             )
-    return {"id": user_id, "email": email, "name": name, "role": "member", "status": "active"}
+    result = {"id": user_id, "email": email, "name": name, "role": "member", "status": status}
+    if status == "invited":
+        result["activation"] = create_auth_token(user_id, "invite")
+    return result
 
 
 def update_managed_user(user_id: str, payload: dict, actor_id: str) -> dict:
@@ -544,7 +611,7 @@ def update_managed_user(user_id: str, payload: dict, actor_id: str) -> dict:
         if not row:
             raise ValueError("Kullanıcı bulunamadı")
         status = str(payload.get("status") or row["status"])
-        if status not in {"active", "suspended"}:
+        if status not in {"active", "invited", "suspended"}:
             raise ValueError("Geçersiz hesap durumu")
         if user_id == actor_id and status != "active":
             raise ValueError("Kendi yönetici hesabınızı pasifleştiremezsiniz")
@@ -1845,6 +1912,11 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                     "Set-Cookie": f"videoluk_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}"
                 })
                 return
+            if route == "/api/auth/password":
+                body = self.read_json()
+                result = complete_auth_token(str(body.get("token") or ""), str(body.get("password") or ""))
+                self.send_json(HTTPStatus.OK, result)
+                return
             user = self.require_user()
             if not user:
                 return
@@ -1868,6 +1940,13 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                     return
                 user_id = route.strip("/").split("/")[3]
                 self.send_json(HTTPStatus.OK, update_managed_user(user_id, body, owner["id"]))
+                return
+            if route.startswith("/api/admin/users/") and route.endswith("/reset"):
+                owner = self.require_owner()
+                if not owner:
+                    return
+                user_id = route.strip("/").split("/")[3]
+                self.send_json(HTTPStatus.CREATED, create_auth_token(user_id, "reset"))
                 return
             if route == "/api/payments/iyzico/checkout":
                 result = initialize_credit_checkout(user, str(body.get("packageId") or ""), body.get("billing") or {}, self.client_address[0])
@@ -2081,6 +2160,13 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "authenticated": bool(user),
                 "user": user,
             })
+            return
+        if route == "/api/auth/token":
+            token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+            try:
+                self.send_json(HTTPStatus.OK, inspect_auth_token(token))
+            except ValueError as exc:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
         if route.startswith("/api/") and not self.require_user():
             return

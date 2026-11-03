@@ -381,6 +381,25 @@ class VideolukCoreTests(unittest.TestCase):
                     self.assertIsNone(connection.execute("SELECT 1 FROM sessions WHERE token_hash = ?", (server.session_token_hash(token),)).fetchone())
                 with self.assertRaisesRegex(ValueError, "zaten kayıtlı"):
                     server.create_managed_user({"name": "Tekrar", "email": "uye@example.com", "password": "guvenli-parola-456"})
+                invited = server.create_managed_user({"name": "Davetli Üye", "email": "davet@example.com"})
+                self.assertEqual("invited", invited["status"])
+                invite_token = invited["activation"]["token"]
+                self.assertEqual("invite", server.inspect_auth_token(invite_token)["purpose"])
+                completed = server.complete_auth_token(invite_token, "yeni-guvenli-parola")
+                self.assertTrue(completed["completed"])
+                with self.assertRaisesRegex(ValueError, "geçersiz"):
+                    server.complete_auth_token(invite_token, "baska-guvenli-parola")
+                with server.db() as connection:
+                    activated = connection.execute("SELECT status, password_hash FROM users WHERE id = ?", (invited["id"],)).fetchone()
+                self.assertEqual("active", activated["status"])
+                self.assertTrue(server.verify_password("yeni-guvenli-parola", activated["password_hash"]))
+                reset = server.create_auth_token(invited["id"], "reset")
+                self.assertEqual("reset", server.inspect_auth_token(reset["token"])["purpose"])
+                server.update_managed_user(invited["id"], {"status": "suspended"}, "owner-1")
+                server.complete_auth_token(reset["token"], "yenilenen-guvenli-parola")
+                with server.db() as connection:
+                    reset_user = connection.execute("SELECT status FROM users WHERE id = ?", (invited["id"],)).fetchone()
+                self.assertEqual("suspended", reset_user["status"])
         finally:
             for name, value in originals.items():
                 setattr(server, name, value)
