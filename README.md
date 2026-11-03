@@ -71,6 +71,8 @@ Maliyet kontrolü için kullanıcı başına proje, depolama ve aylık render ko
 
 Her hesap başlangıçta varsayılan 120 kredi alır. Render öncesinde video süresi, seslendirme ve yapay zekâ sahne sayısına göre tahmini kredi maliyeti gösterilir; kullanıcı onayladığında kredi hareketi değişmez bir işlem kaydı olarak saklanır. Başarısız renderın kredisi otomatik iade edilir. Başlangıç bakiyesi `VIDEOLUK_STARTER_CREDITS` ile ayarlanabilir. Ödeme sağlayıcısı daha sonra yalnızca pozitif kredi hareketi oluşturan katman olarak bağlanacaktır.
 
+Kredi satın alma iyzico Checkout Form ile hazırlanmıştır. Kart verisi Videoluk'a uğramaz; kullanıcı iyzico ödeme sayfasına yönlendirilir. Callback tokenı sunucudan iyzico'ya tekrar sorgulanır, ödeme tutarı/sepet/para birimi ve fraud onayı eşleşmeden kredi eklenmez. Aynı sipariş ikinci kez kredi yükleyemez. Sandbox için `VIDEOLUK_IYZICO_API_KEY`, `VIDEOLUK_IYZICO_SECRET_KEY`, `VIDEOLUK_IYZICO_BASE_URL` ve HTTPS kullanan `VIDEOLUK_PUBLIC_BASE_URL` ayarlanmalıdır.
+
 Sağlık kontrolü:
 
 ```bash
@@ -129,6 +131,9 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `GET /api/projects/:id`
 - `GET /api/usage`
 - `POST /api/cost-estimate`
+- `GET /api/credit-packages`
+- `POST /api/payments/iyzico/checkout`
+- `POST /api/payments/iyzico/callback`
 - `POST /api/projects/:id/duplicate`
 - `DELETE /api/projects/:id`
 - `POST /api/renders`

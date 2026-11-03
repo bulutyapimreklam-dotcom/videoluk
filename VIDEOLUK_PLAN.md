@@ -165,6 +165,7 @@ Kredi paketleri, abonelik, ekip çalışma alanı, marka kiti, şablonlar, kulla
 - Timeline müzik kanalı, ses seviyesi ve seslendirmeyle FFmpeg miksleme
 - Kullanıcı başına proje, depolama ve aylık render kotası; hesap ekranında kullanım göstergeleri
 - Kredi bakiyesi, değişmez kredi hareketleri, render öncesi maliyet tahmini ve başarısız işte otomatik iade
+- iyzico Checkout Form paket satışı, sunucu tarafı callback doğrulaması ve tek-seferlik kredi yükleme
 - Altyazı açma/kapama, stil ve konumun gerçek rendera aktarılması
 - Kuyruklu FFmpeg render, yeniden başlatma kurtarması, MP4 ve SRT indirme
 - Docker/Caddy üretim paketi, özel beta erişim koruması ve GitHub doğrulama hattı

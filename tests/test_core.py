@@ -242,6 +242,32 @@ class VideolukCoreTests(unittest.TestCase):
         self.assertEqual(7, ai["totalCredits"])
         self.assertEqual(4, ai["breakdown"]["aiMedia"])
 
+    def test_iyzico_callback_credits_order_only_once(self):
+        originals = {"DATA": server.DATA, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH, "iyzico_request": server.iyzico_request}
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root
+                server.UPLOADS = root / "uploads"
+                server.DB_PATH = root / "videoluk.db"
+                server.initialize()
+                stamp = server.now()
+                with server.db() as connection:
+                    connection.execute(
+                        "INSERT INTO payment_orders VALUES (?, ?, 'iyzico', 'mini', 100, '199.00', 'TRY', 'secure-token', NULL, 'pending', NULL, ?, ?)",
+                        ("order-1", server.LOCAL_USER_ID, stamp, stamp),
+                    )
+                server.iyzico_request = lambda _path, _payload: {
+                    "status": "success", "paymentStatus": "SUCCESS", "fraudStatus": 1, "basketId": "order-1",
+                    "currency": "TRY", "price": 199, "paymentId": "payment-1",
+                }
+                self.assertTrue(server.complete_iyzico_order("order-1", "secure-token"))
+                self.assertTrue(server.complete_iyzico_order("order-1", "secure-token"))
+                self.assertEqual(server.STARTER_CREDITS + 100, server.user_usage(server.LOCAL_USER_ID)["credits"])
+        finally:
+            for name, value in originals.items():
+                setattr(server, name, value)
+
 
 if __name__ == "__main__":
     unittest.main()

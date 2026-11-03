@@ -70,6 +70,15 @@ MAX_PROJECTS_PER_USER = max(1, int(os.getenv("VIDEOLUK_MAX_PROJECTS_PER_USER", "
 MAX_STORAGE_BYTES_PER_USER = max(MAX_UPLOAD_BYTES, int(os.getenv("VIDEOLUK_MAX_STORAGE_BYTES_PER_USER", str(5 * 1024 * 1024 * 1024))))
 MAX_MONTHLY_RENDERS_PER_USER = max(1, int(os.getenv("VIDEOLUK_MAX_MONTHLY_RENDERS_PER_USER", "60")))
 STARTER_CREDITS = max(0, int(os.getenv("VIDEOLUK_STARTER_CREDITS", "120")))
+IYZICO_API_KEY = os.getenv("VIDEOLUK_IYZICO_API_KEY", "")
+IYZICO_SECRET_KEY = os.getenv("VIDEOLUK_IYZICO_SECRET_KEY", "")
+IYZICO_BASE_URL = os.getenv("VIDEOLUK_IYZICO_BASE_URL", "https://sandbox-api.iyzipay.com").rstrip("/")
+PUBLIC_BASE_URL = os.getenv("VIDEOLUK_PUBLIC_BASE_URL", "").rstrip("/")
+CREDIT_PACKAGES = {
+    "mini": {"name": "Başlangıç", "credits": 100, "price": "199.00"},
+    "creator": {"name": "Üretici", "credits": 500, "price": "799.00"},
+    "studio": {"name": "Stüdyo", "credits": 1200, "price": "1499.00"},
+}
 RENDER_WORKERS = max(1, min(4, int(os.getenv("VIDEOLUK_RENDER_WORKERS", "1"))))
 MAX_QUEUED_RENDERS = max(1, int(os.getenv("VIDEOLUK_MAX_QUEUED_RENDERS", "8")))
 ALLOWED_ORIGIN = os.getenv("VIDEOLUK_ALLOWED_ORIGIN", "").rstrip("/")
@@ -215,6 +224,22 @@ def initialize() -> None:
                 description TEXT NOT NULL,
                 metadata TEXT,
                 created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS payment_orders (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                package_id TEXT NOT NULL,
+                credits INTEGER NOT NULL,
+                amount TEXT NOT NULL,
+                currency TEXT NOT NULL,
+                token TEXT,
+                payment_id TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
             """
@@ -477,6 +502,96 @@ def render_credit_cost(user_id: str, job_id: str) -> int:
         except (ValueError, TypeError, json.JSONDecodeError):
             continue
     return 0
+
+
+def iyzico_ready() -> bool:
+    return bool(IYZICO_API_KEY and IYZICO_SECRET_KEY and PUBLIC_BASE_URL.startswith("https://"))
+
+
+def iyzico_request(path: str, payload: dict) -> dict:
+    if not iyzico_ready():
+        raise ValueError("iyzico ödeme bağlantısı henüz yapılandırılmadı")
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    random_key = f"{int(datetime.now(timezone.utc).timestamp() * 1000)}{secrets.randbelow(1_000_000_000):09d}"
+    signature = hmac.new(IYZICO_SECRET_KEY.encode(), f"{random_key}{path}{body}".encode(), hashlib.sha256).hexdigest()
+    authorization_text = f"apiKey:{IYZICO_API_KEY}&randomKey:{random_key}&signature:{signature}"
+    authorization = "IYZWSv2 " + base64.b64encode(authorization_text.encode()).decode()
+    request = Request(
+        f"{IYZICO_BASE_URL}{path}", data=body.encode(), method="POST",
+        headers={"Authorization": authorization, "x-iyzi-rnd": random_key, "Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        result = json.loads(exc.read().decode("utf-8") or "{}")
+    if result.get("status") != "success":
+        raise ValueError(str(result.get("errorMessage") or "iyzico işlemi başlatılamadı"))
+    return result
+
+
+def initialize_credit_checkout(user: dict, package_id: str, billing: dict, ip_address: str) -> dict:
+    package = CREDIT_PACKAGES.get(package_id)
+    if not package:
+        raise ValueError("Geçersiz kredi paketi")
+    required = {key: " ".join(str(billing.get(key) or "").split()) for key in ("name", "surname", "identityNumber", "gsmNumber", "address", "city")}
+    if any(not value for value in required.values()):
+        raise ValueError("Ödeme için ad, soyad, telefon, kimlik ve fatura adresi gerekli")
+    order_id = str(uuid.uuid4())
+    timestamp = now()
+    with DB_LOCK, db() as connection:
+        connection.execute(
+            "INSERT INTO payment_orders VALUES (?, ?, 'iyzico', ?, ?, ?, 'TRY', NULL, NULL, 'created', NULL, ?, ?)",
+            (order_id, user["id"], package_id, package["credits"], package["price"], timestamp, timestamp),
+        )
+    callback_url = f"{PUBLIC_BASE_URL}/api/payments/iyzico/callback?orderId={order_id}"
+    contact_name = f"{required['name']} {required['surname']}"
+    payload = {
+        "locale": "tr", "conversationId": order_id, "price": package["price"], "paidPrice": package["price"],
+        "currency": "TRY", "basketId": order_id, "paymentGroup": "PRODUCT", "callbackUrl": callback_url,
+        "enabledInstallments": [1],
+        "buyer": {"id": user["id"], "name": required["name"], "surname": required["surname"],
+                  "identityNumber": required["identityNumber"], "email": user["email"], "gsmNumber": required["gsmNumber"],
+                  "registrationAddress": required["address"], "city": required["city"], "country": "Türkiye", "ip": ip_address},
+        "billingAddress": {"address": required["address"], "contactName": contact_name, "city": required["city"], "country": "Türkiye"},
+        "basketItems": [{"id": package_id, "price": package["price"], "name": f"Videoluk {package['name']} Kredi Paketi", "category1": "Dijital Hizmet", "itemType": "VIRTUAL"}],
+    }
+    try:
+        result = iyzico_request("/payment/iyzipos/checkoutform/initialize/auth/ecom", payload)
+        with DB_LOCK, db() as connection:
+            connection.execute("UPDATE payment_orders SET token = ?, status = 'pending', updated_at = ? WHERE id = ?", (result.get("token"), now(), order_id))
+        return {"orderId": order_id, "paymentPageUrl": result.get("paymentPageUrl"), "token": result.get("token")}
+    except Exception as exc:
+        with DB_LOCK, db() as connection:
+            connection.execute("UPDATE payment_orders SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", (str(exc)[:500], now(), order_id))
+        raise
+
+
+def complete_iyzico_order(order_id: str, token: str) -> bool:
+    with db() as connection:
+        row = connection.execute("SELECT * FROM payment_orders WHERE id = ? AND provider = 'iyzico'", (order_id,)).fetchone()
+    if not row or row["status"] == "paid" or not token or (row["token"] and not hmac.compare_digest(row["token"], token)):
+        return bool(row and row["status"] == "paid")
+    result = iyzico_request("/payment/iyzipos/checkoutform/auth/ecom/detail", {"locale": "tr", "conversationId": order_id, "token": token})
+    approved = (
+        result.get("paymentStatus") == "SUCCESS" and int(result.get("fraudStatus") or 0) == 1
+        and str(result.get("basketId")) == order_id and str(result.get("currency")) == "TRY"
+        and f"{float(result.get('price') or 0):.2f}" == f"{float(row['amount']):.2f}"
+    )
+    with DB_LOCK, db() as connection:
+        current = connection.execute("SELECT status FROM payment_orders WHERE id = ?", (order_id,)).fetchone()
+        if approved and current and current["status"] != "paid":
+            connection.execute(
+                "UPDATE payment_orders SET status = 'paid', payment_id = ?, updated_at = ? WHERE id = ?",
+                (str(result.get("paymentId") or ""), now(), order_id),
+            )
+            connection.execute(
+                "INSERT INTO credit_transactions VALUES (?, ?, ?, 'purchase', ?, ?, ?)",
+                (str(uuid.uuid4()), row["user_id"], row["credits"], "iyzico kredi paketi", json.dumps({"orderId": order_id, "paymentId": result.get("paymentId")}), now()),
+            )
+        elif not approved:
+            connection.execute("UPDATE payment_orders SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", ("Ödeme onaylanmadı", now(), order_id))
+    return approved
 
 
 def srt_time(seconds: float) -> str:
@@ -1452,6 +1567,15 @@ class VideolukHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             route = urlparse(self.path).path
+            if route == "/api/payments/iyzico/callback":
+                length = min(int(self.headers.get("Content-Length", "0")), 16_384)
+                form = parse_qs(self.rfile.read(length).decode("utf-8"))
+                order_id = parse_qs(urlparse(self.path).query).get("orderId", [""])[0]
+                success = complete_iyzico_order(order_id, form.get("token", [""])[0])
+                self.send_response(HTTPStatus.SEE_OTHER)
+                self.send_header("Location", f"/?payment={'success' if success else 'failed'}")
+                self.end_headers()
+                return
             if route == "/api/auth/login":
                 body = self.read_json()
                 email = str(body.get("email") or "").strip().lower()[:254]
@@ -1492,6 +1616,10 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 self.receive_training_video(params.get("profileId", ["default"])[0])
                 return
             body = self.read_json()
+            if route == "/api/payments/iyzico/checkout":
+                result = initialize_credit_checkout(user, str(body.get("packageId") or ""), body.get("billing") or {}, self.client_address[0])
+                self.send_json(HTTPStatus.CREATED, result)
+                return
             if route == "/api/cost-estimate":
                 estimate = estimate_project_cost(body)
                 estimate["availableCredits"] = user_usage(user["id"])["credits"]
@@ -1720,6 +1848,12 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/usage":
             self.send_json(HTTPStatus.OK, user_usage(self.current_user()["id"]))
+            return
+        if route == "/api/credit-packages":
+            self.send_json(HTTPStatus.OK, {
+                "provider": "iyzico", "configured": iyzico_ready(),
+                "packages": [{"id": package_id, **package, "currency": "TRY"} for package_id, package in CREDIT_PACKAGES.items()],
+            })
             return
         if route.startswith("/api/projects/"):
             project_id = route.rsplit("/", 1)[-1]
