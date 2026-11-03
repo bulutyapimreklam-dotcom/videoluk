@@ -498,7 +498,8 @@ def send_webhook_alert(level: str, source: str, message: str) -> bool:
     key = f"{level}:{source}:{message[:160]}"
     with ALERT_LOCK:
         current = time.monotonic()
-        if current - ALERT_LAST_SENT.get(key, 0) < ALERT_COOLDOWN_SECONDS:
+        last_sent = ALERT_LAST_SENT.get(key)
+        if last_sent is not None and current - last_sent < ALERT_COOLDOWN_SECONDS:
             return False
         ALERT_LAST_SENT[key] = current
     title = f"Videoluk {level.upper()} · {source}"
