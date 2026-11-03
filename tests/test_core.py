@@ -291,6 +291,7 @@ class VideolukCoreTests(unittest.TestCase):
                         "INSERT INTO credit_transactions VALUES (?, ?, 100, 'purchase', 'Test', NULL, ?)",
                         ("admin-credit", "member-1", stamp),
                     )
+                server.record_system_event("error", "test", "Kontrollü test hatası", {"secret": "yanıta çıkmamalı"})
                 overview = server.admin_overview()
                 self.assertEqual(1, overview["metrics"]["users"])
                 self.assertEqual(1, overview["metrics"]["projects"])
@@ -298,6 +299,10 @@ class VideolukCoreTests(unittest.TestCase):
                 self.assertEqual(1, overview["metrics"]["rendersCompleted"])
                 self.assertEqual(199.0, overview["metrics"]["revenueTry"])
                 self.assertEqual(100, overview["users"][0]["credits"])
+                self.assertEqual("degraded", overview["operations"]["status"])
+                self.assertEqual(1, overview["operations"]["errors24h"])
+                self.assertEqual("test", overview["events"][0]["source"])
+                self.assertNotIn("metadata", overview["events"][0])
                 self.assertNotIn("password_hash", overview["users"][0])
                 self.assertNotIn("token", overview["payments"][0])
         finally:

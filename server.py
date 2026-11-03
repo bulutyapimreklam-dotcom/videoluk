@@ -242,6 +242,15 @@ def initialize() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
+            CREATE TABLE IF NOT EXISTS system_events (
+                id TEXT PRIMARY KEY,
+                level TEXT NOT NULL,
+                source TEXT NOT NULL,
+                message TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at DESC);
             """
         )
         project_columns = {row["name"] for row in connection.execute("PRAGMA table_info(projects)").fetchall()}
@@ -473,6 +482,50 @@ def user_usage(user_id: str) -> dict:
     }
 
 
+def record_system_event(level: str, source: str, message: str, metadata: dict | None = None) -> None:
+    safe_level = level if level in {"info", "warning", "error"} else "error"
+    try:
+        with DB_LOCK, db() as connection:
+            connection.execute(
+                "INSERT INTO system_events VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), safe_level, source[:80], message[:1000], json.dumps(metadata or {}, ensure_ascii=False), now()),
+            )
+            connection.execute(
+                "DELETE FROM system_events WHERE id NOT IN (SELECT id FROM system_events ORDER BY created_at DESC LIMIT 1000)"
+            )
+    except Exception:
+        traceback.print_exc()
+
+
+def operational_status() -> dict:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    disk = shutil.disk_usage(DATA)
+    with db() as connection:
+        queued = int(connection.execute("SELECT COUNT(*) AS total FROM render_jobs WHERE status IN ('queued', 'rendering')").fetchone()["total"])
+        failed_renders = int(connection.execute("SELECT COUNT(*) AS total FROM render_jobs WHERE status = 'failed' AND updated_at >= ?", (cutoff,)).fetchone()["total"])
+        failed_payments = int(connection.execute("SELECT COUNT(*) AS total FROM payment_orders WHERE status = 'failed' AND updated_at >= ?", (cutoff,)).fetchone()["total"])
+        errors = int(connection.execute("SELECT COUNT(*) AS total FROM system_events WHERE level = 'error' AND created_at >= ?", (cutoff,)).fetchone()["total"])
+    disk_percent = round((disk.used / max(1, disk.total)) * 100, 1)
+    alerts = []
+    if disk_percent >= 85:
+        alerts.append({"level": "error" if disk_percent >= 95 else "warning", "message": f"Sunucu diski %{disk_percent} dolu"})
+    if failed_renders:
+        alerts.append({"level": "warning", "message": f"Son 24 saatte {failed_renders} render başarısız oldu"})
+    if failed_payments:
+        alerts.append({"level": "warning", "message": f"Son 24 saatte {failed_payments} ödeme başarısız oldu"})
+    if errors:
+        alerts.append({"level": "error", "message": f"Son 24 saatte {errors} sistem hatası kaydedildi"})
+    return {
+        "status": "degraded" if alerts else "healthy",
+        "queue": queued,
+        "failedRenders24h": failed_renders,
+        "failedPayments24h": failed_payments,
+        "errors24h": errors,
+        "disk": {"usedBytes": disk.used, "totalBytes": disk.total, "percent": disk_percent},
+        "alerts": alerts,
+    }
+
+
 def admin_overview() -> dict:
     with db() as connection:
         metrics = {
@@ -500,7 +553,10 @@ def admin_overview() -> dict:
             "FROM render_jobs JOIN projects ON projects.id = render_jobs.project_id JOIN users ON users.id = projects.user_id "
             "ORDER BY render_jobs.created_at DESC LIMIT 50"
         ).fetchall()
-    return {"metrics": metrics, "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders]}
+        events = connection.execute(
+            "SELECT id, level, source, message, created_at FROM system_events ORDER BY created_at DESC LIMIT 50"
+        ).fetchall()
+    return {"metrics": metrics, "operations": operational_status(), "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders], "events": [dict(row) for row in events]}
 
 
 def estimate_project_cost(payload: dict) -> dict:
@@ -1375,6 +1431,7 @@ def render(job_id: str, project: dict) -> None:
     except Exception as exc:
         traceback.print_exc()
         update_job(job_id, status="failed", error=str(exc), progress=0)
+        record_system_event("error", "render", str(exc), {"jobId": job_id, "projectId": project.get("id")})
         refund = int(project.get("credit_cost") or 0)
         refund_user = project.get("user_id")
         if refund and refund_user:
@@ -1837,14 +1894,16 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception as exc:
             traceback.print_exc()
-            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            record_system_event("error", "api", str(exc), {"method": "POST", "path": urlparse(self.path).path})
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "İşlem sırasında beklenmeyen bir sunucu hatası oluştu"})
 
     def do_GET(self) -> None:
         route = urlparse(self.path).path
         if route == "/api/health":
+            operations = operational_status()
             self.send_json(HTTPStatus.OK, {
                 "service": "videoluk-api",
-                "status": "ok",
+                "status": "ok" if operations["status"] == "healthy" else "degraded",
                 "textEngine": "ai" if LLM_URL and LLM_MODEL else "local",
                 "model": LLM_MODEL or None,
                 "imageEngine": "ai" if IMAGE_URL and IMAGE_MODEL else "stock-fallback",
@@ -1853,6 +1912,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "voiceEngine": "system-tts" if shutil.which("say") or shutil.which("espeak-ng") else None,
                 "authRequired": AUTH_REQUIRED,
                 "authReady": bool(not AUTH_REQUIRED or (ADMIN_EMAIL and ADMIN_PASSWORD)),
+                "queue": operations["queue"],
             })
             return
         if route == "/api/auth/status":
@@ -2067,7 +2127,8 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {"deleted": True, "id": project_id})
         except Exception as exc:
             traceback.print_exc()
-            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            record_system_event("error", "api", str(exc), {"method": "DELETE", "path": urlparse(self.path).path})
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "İşlem sırasında beklenmeyen bir sunucu hatası oluştu"})
 
 
 if __name__ == "__main__":
