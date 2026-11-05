@@ -635,6 +635,64 @@ def user_usage(user_id: str) -> dict:
     }
 
 
+def account_data_export(user_id: str) -> dict:
+    """Return a portable account archive without credentials or server file paths."""
+    def decoded(value):
+        if not value:
+            return None
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return value
+
+    with db() as connection:
+        user = connection.execute(
+            "SELECT id, email, name, role, status, created_at, updated_at FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not user:
+            raise ValueError("Kullanıcı bulunamadı")
+        limits = connection.execute(
+            "SELECT project_limit, storage_limit_bytes, monthly_render_limit, updated_at FROM user_limits WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        project_rows = connection.execute(
+            "SELECT id, title, payload, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY created_at", (user_id,)
+        ).fetchall()
+        asset_rows = connection.execute(
+            "SELECT id, filename, kind, mime_type, size_bytes, created_at FROM media_assets WHERE user_id = ? ORDER BY created_at", (user_id,)
+        ).fetchall()
+        render_rows = connection.execute(
+            "SELECT render_jobs.id, render_jobs.project_id, render_jobs.status, render_jobs.progress, "
+            "render_jobs.created_at, render_jobs.updated_at FROM render_jobs "
+            "JOIN projects ON projects.id = render_jobs.project_id WHERE projects.user_id = ? ORDER BY render_jobs.created_at",
+            (user_id,),
+        ).fetchall()
+        usage_rows = connection.execute(
+            "SELECT id, event_type, value, metadata, created_at FROM usage_events WHERE user_id = ? ORDER BY created_at", (user_id,)
+        ).fetchall()
+        credit_rows = connection.execute(
+            "SELECT id, amount, transaction_type, description, metadata, created_at FROM credit_transactions WHERE user_id = ? ORDER BY created_at",
+            (user_id,),
+        ).fetchall()
+        payment_rows = connection.execute(
+            "SELECT id, provider, package_id, credits, amount, currency, status, created_at, updated_at "
+            "FROM payment_orders WHERE user_id = ? ORDER BY created_at", (user_id,)
+        ).fetchall()
+
+    projects = []
+    for row in project_rows:
+        project = decoded(row["payload"]) or {}
+        project.update({"id": row["id"], "title": row["title"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]})
+        projects.append(project)
+    usage = [{**dict(row), "metadata": decoded(row["metadata"])} for row in usage_rows]
+    credits = [{**dict(row), "metadata": decoded(row["metadata"])} for row in credit_rows]
+    return {
+        "format": "videoluk-account-export-v1", "exportedAt": now(), "account": dict(user),
+        "limits": dict(limits) if limits else None, "projects": projects,
+        "media": [dict(row) for row in asset_rows], "renders": [dict(row) for row in render_rows],
+        "usageEvents": usage, "creditTransactions": credits, "payments": [dict(row) for row in payment_rows],
+    }
+
+
 def create_managed_user(payload: dict) -> dict:
     email = str(payload.get("email") or "").strip().lower()[:254]
     name = " ".join(str(payload.get("name") or "").split())[:120]
@@ -1468,6 +1526,8 @@ def generate_scene_image(prompt: str, orientation: str) -> dict:
             "thumbnail": f"/api/images/{image_id}", "imageUrl": f"/api/images/{image_id}",
             "creator": "Videoluk AI", "provider": "ai", "prompt": clean_prompt,
         }
+
+
     except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError, binascii.Error) as exc:
         raise ValueError(f"Yapay zekâ görseli üretilemedi: {exc}") from exc
 
@@ -2302,6 +2362,16 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/usage":
             self.send_json(HTTPStatus.OK, user_usage(self.current_user()["id"]))
+            return
+        if route == "/api/account/export":
+            payload = json.dumps(account_data_export(self.current_user()["id"]), ensure_ascii=False, indent=2).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="videoluk-verilerim.json"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
             return
         if route == "/api/credit-packages":
             self.send_json(HTTPStatus.OK, {

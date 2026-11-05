@@ -152,6 +152,7 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `GET /api/projects`
 - `GET /api/projects/:id`
 - `GET /api/usage`
+- `GET /api/account/export`
 - `POST /api/cost-estimate`
 - `GET /api/credit-packages`
 - `POST /api/payments/iyzico/checkout`
@@ -164,6 +165,8 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `GET /api/renders/:id/subtitles`
 
 Owner hesabı proje kütüphanesindeki **Yönetim** düğmesinden toplam kullanıcı, proje, depolama, render ve tahsilat özetini; son kullanıcıları, işleri ve ödemeleri görebilir. Yönetim API'si normal kullanıcılar için `403` döndürür ve parola, oturum ya da ödeme tokenı paylaşmaz.
+
+Her kullanıcı hesap penceresindeki **Verilerimi indir** düğmesiyle hesap, proje, medya metadatası, render, kullanım, kredi ve ödeme geçmişini JSON olarak dışa aktarabilir. Dışa aktarım parola özeti, oturum tokenları, ödeme tokenları ve sunucu dosya yollarını içermez.
 
 Owner aynı ekrandan yeni üye hesabı oluşturabilir, kredi ekleyip çıkarabilir, kullanıcıya özel proje/depolama/aylık render kotası tanımlayabilir ve hesabı pasifleştirebilir. Pasifleştirilen hesabın açık oturumları anında kapatılır; yönetici kendi hesabını pasifleştiremez ve kredi bakiyesi sıfırın altına indirilemez.
 

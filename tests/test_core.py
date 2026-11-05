@@ -7,6 +7,46 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_account_export_is_portable_and_excludes_secrets(self):
+        originals = {
+            "DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES,
+            "MEDIA_CACHE": server.MEDIA_CACHE, "GENERATED_IMAGES": server.GENERATED_IMAGES,
+            "TRAINING_VIDEOS": server.TRAINING_VIDEOS, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH,
+        }
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root
+                server.OUTPUTS = root / "renders"
+                server.VOICES = root / "voices"
+                server.MEDIA_CACHE = root / "media-cache"
+                server.GENERATED_IMAGES = root / "generated-images"
+                server.TRAINING_VIDEOS = root / "training-videos"
+                server.UPLOADS = root / "uploads"
+                server.DB_PATH = root / "videoluk.db"
+                server.initialize()
+                user = server.create_managed_user({"name": "Dışa Aktarım", "email": "export@example.com", "password": "guvenli-parola-123"})
+                timestamp = server.now()
+                with server.db() as connection:
+                    connection.execute(
+                        "INSERT INTO projects (id, title, payload, created_at, updated_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        ("project-export", "Örnek proje", json.dumps({"script": "Taşınabilir metin"}), timestamp, timestamp, user["id"]),
+                    )
+                    connection.execute(
+                        "INSERT INTO payment_orders VALUES (?, ?, 'iyzico', 'mini', 100, '199.00', 'TRY', ?, ?, 'paid', NULL, ?, ?)",
+                        ("payment-export", user["id"], "secret-payment-token", "provider-payment-id", timestamp, timestamp),
+                    )
+                exported = server.account_data_export(user["id"])
+                encoded = json.dumps(exported, ensure_ascii=False)
+                self.assertEqual("videoluk-account-export-v1", exported["format"])
+                self.assertEqual("Taşınabilir metin", exported["projects"][0]["script"])
+                self.assertEqual("paid", exported["payments"][0]["status"])
+                for secret in ("password_hash", "secret-payment-token", "provider-payment-id", "file_path", "token_hash"):
+                    self.assertNotIn(secret, encoded)
+        finally:
+            for name, value in originals.items():
+                setattr(server, name, value)
+
     def test_account_email_uses_smtp_without_exposing_credentials(self):
         originals = {
             "DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES,
