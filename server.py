@@ -951,6 +951,36 @@ def operational_status() -> dict:
     }
 
 
+def production_readiness() -> dict:
+    """Report launch readiness without exposing credentials or secret values."""
+    legal_files = (DIST / "gizlilik.html", DIST / "kullanim-kosullari.html")
+    legal_ready = all(path.is_file() and "EKLENECEK" not in path.read_text(encoding="utf-8") for path in legal_files)
+    payment_configured = iyzico_ready()
+    checks = [
+        {"id": "render", "category": "Motor", "label": "FFmpeg render motoru", "ready": bool(shutil.which(FFMPEG)), "betaRequired": True, "commercialRequired": True, "detail": "Sunucuda MP4 ve SRT üretir."},
+        {"id": "text", "category": "İçerik", "label": "Yapay zekâ metin sağlayıcısı", "ready": bool(LLM_URL and LLM_MODEL), "betaRequired": False, "commercialRequired": False, "detail": "Eksikse yerel metin motoru çalışır; kalite testi için sağlayıcı önerilir."},
+        {"id": "image", "category": "İçerik", "label": "Yapay zekâ görsel sağlayıcısı", "ready": bool(IMAGE_URL and IMAGE_MODEL), "betaRequired": False, "commercialRequired": False, "detail": "Eksikse stok veya kullanıcı yüklemesi kullanılır."},
+        {"id": "stock", "category": "İçerik", "label": "Pexels stok sağlayıcısı", "ready": bool(PEXELS_API_KEY), "betaRequired": False, "commercialRequired": False, "detail": "Eksikse Wikimedia Commons yedeği kullanılabilir."},
+        {"id": "voice", "category": "Motor", "label": "Sunucu seslendirmesi", "ready": bool(shutil.which("say") or shutil.which("espeak-ng")), "betaRequired": True, "commercialRequired": True, "detail": "Yerel TTS ile ses dosyası üretir."},
+        {"id": "auth", "category": "Güvenlik", "label": "Zorunlu kullanıcı girişi", "ready": bool(AUTH_REQUIRED and ADMIN_EMAIL and ADMIN_PASSWORD), "betaRequired": False, "commercialRequired": True, "detail": "Ticari yayında hesapları ve projeleri ayırır."},
+        {"id": "https", "category": "Yayın", "label": "HTTPS alan adı", "ready": PUBLIC_BASE_URL.startswith("https://"), "betaRequired": False, "commercialRequired": True, "detail": "Sunucu alınana kadar kapalı kalabilir."},
+        {"id": "cookies", "category": "Güvenlik", "label": "Güvenli oturum çerezi", "ready": bool(SECURE_COOKIES), "betaRequired": False, "commercialRequired": True, "detail": "HTTPS yayında açılmalıdır."},
+        {"id": "email", "category": "İletişim", "label": "SMTP e-posta teslimi", "ready": email_delivery_ready(), "betaRequired": False, "commercialRequired": True, "detail": "Davet ve parola yenileme bağlantılarını gönderir."},
+        {"id": "payment", "category": "Ödeme", "label": "Canlı iyzico bağlantısı", "ready": payment_configured and "sandbox" not in IYZICO_BASE_URL.casefold(), "betaRequired": False, "commercialRequired": True, "detail": "Sandbox test için yeterlidir; satış için canlı anahtar gerekir.", "configured": payment_configured},
+        {"id": "legal", "category": "Yasal", "label": "Şirket ve KVKK bilgileri", "ready": legal_ready, "betaRequired": False, "commercialRequired": True, "detail": "Ticari unvan, adres ve başvuru e-postası doldurulmalıdır."},
+        {"id": "alerts", "category": "Operasyon", "label": "Hata bildirim kanalı", "ready": bool(ALERT_WEBHOOK_URL), "betaRequired": False, "commercialRequired": False, "detail": "Canlı kullanımda önerilir."},
+    ]
+    beta_required = [item for item in checks if item["betaRequired"]]
+    commercial_required = [item for item in checks if item["commercialRequired"]]
+    return {
+        "betaReady": all(item["ready"] for item in beta_required),
+        "commercialReady": all(item["ready"] for item in commercial_required),
+        "readyCount": sum(1 for item in checks if item["ready"]),
+        "totalCount": len(checks),
+        "checks": checks,
+    }
+
+
 def admin_overview() -> dict:
     with db() as connection:
         metrics = {
@@ -1004,7 +1034,7 @@ def admin_overview() -> dict:
         except json.JSONDecodeError:
             item["details"] = {}
         audit_items.append(item)
-    return {"metrics": metrics, "operations": operational_status(), "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders], "events": [dict(row) for row in events], "audit": audit_items, "deletionRequests": [dict(row) for row in deletion_requests]}
+    return {"metrics": metrics, "operations": operational_status(), "readiness": production_readiness(), "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders], "events": [dict(row) for row in events], "audit": audit_items, "deletionRequests": [dict(row) for row in deletion_requests]}
 
 
 def estimate_project_cost(payload: dict) -> dict:
@@ -2421,6 +2451,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         route = urlparse(self.path).path
         if route == "/api/health":
             operations = operational_status()
+            readiness = production_readiness()
             self.send_json(HTTPStatus.OK, {
                 "service": "videoluk-api",
                 "status": "ok" if operations["status"] == "healthy" else "degraded",
@@ -2433,6 +2464,8 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "authRequired": AUTH_REQUIRED,
                 "authReady": bool(not AUTH_REQUIRED or (ADMIN_EMAIL and ADMIN_PASSWORD)),
                 "queue": operations["queue"],
+                "betaReady": readiness["betaReady"],
+                "commercialReady": readiness["commercialReady"],
             })
             return
         if route == "/api/auth/status":

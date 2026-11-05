@@ -190,7 +190,9 @@ Yönetim ekranı ayrıca render kuyruğunu, disk doluluk oranını, son 24 saatt
 
 Anlık hata alarmı için `.env` dosyasında `VIDEOLUK_ALERT_WEBHOOK_URL` tanımlanabilir. Slack, Discord veya HTTPS kabul eden özel bir otomasyon adresi kullanılabilir; gerekiyorsa `VIDEOLUK_ALERT_WEBHOOK_TOKEN` Bearer yetkilendirmesi ekler. Aynı hata `VIDEOLUK_ALERT_COOLDOWN_SECONDS` süresi içinde yeniden gönderilmez. Webhook arızası video üretimini durdurmaz ve yönetim olaylarına uyarı olarak kaydedilir.
 
-Üretim Docker imajı `python scripts/acceptance_test.py` komutuyla ücretli sağlayıcı kullanmadan uçtan uca doğrulanabilir. Kabul testi fikirden sahne üretimini, medya yüklemeyi, Türkçe sistem sesini, proje kaydını, stok/yapay zekâ maliyet ayrımını, kuyruklu FFmpeg renderı, kredi düşümünü ve MP4/SRT indirmeyi gerçek HTTP API üzerinden sınar. GitHub doğrulama hattı bu testi her değişiklikte Docker imajının içinde otomatik çalıştırır.
+Üretim Docker imajı `python scripts/acceptance_test.py` komutuyla ücretli sağlayıcı kullanmadan uçtan uca doğrulanabilir. Kabul testi biyografi, tanıtım ve eğitim içeriklerini; yatay, dikey ve kare yönleri; tekrar etmeyen sahne metinlerini; medya yüklemeyi, sesi, proje kaydını, stok/yapay zekâ maliyet ayrımını, kuyruklu FFmpeg renderı, kredi düşümünü ve MP4/SRT indirmeyi gerçek HTTP API üzerinden sınar. GitHub doğrulama hattı bu testi her değişiklikte Docker imajının içinde otomatik çalıştırır.
+
+Maliyeti ne zaman başlatacağınızı ve ticari yayına hangi sırayla geçileceğini [LAUNCH_CHECKLIST.md](LAUNCH_CHECKLIST.md) açıklar. Aynı kontroller uygulamadaki Yönetim → Yayına hazırlık merkezi ekranında canlı olarak görünür.
 
 Render işleri arka planda FFmpeg ile yürütülür. Dikey, yatay ve kare 1080p çıktı desteklenir.
 

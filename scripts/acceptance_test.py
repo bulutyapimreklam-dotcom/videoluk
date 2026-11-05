@@ -86,14 +86,21 @@ def run() -> dict:
             health = request_json(base_url, "/api/health")
             assert health["service"] == "videoluk-api"
 
-            generated = request_json(base_url, "/api/scripts/generate", "POST", {
-                "idea": "Mahalle üreticilerini müşterilerle buluşturan sürdürülebilir pazar",
-                "duration": 15,
-                "type": "Tanıtım",
-                "tone": "Bilgilendirici",
-            })
-            assert len(generated["scenes"]) >= 3
-            assert len({scene["subtitle"] for scene in generated["scenes"]}) == len(generated["scenes"])
+            scenarios = [
+                {"idea": "Bülent Ecevit biyografisi ve siyasi yaşamındaki dönüm noktaları", "duration": 30, "type": "Hikâye", "tone": "Belgesel", "orientation": "horizontal"},
+                {"idea": "Mahalle üreticilerini müşterilerle buluşturan sürdürülebilir pazar", "duration": 15, "type": "Tanıtım", "tone": "Bilgilendirici", "orientation": "vertical"},
+                {"idea": "Yapay zekâ okuryazarlığına giriş", "duration": 30, "type": "Eğitim", "tone": "Anlaşılır", "orientation": "square"},
+            ]
+            generated_scenarios = []
+            for scenario in scenarios:
+                generated_item = request_json(base_url, "/api/scripts/generate", "POST", scenario)
+                subtitles = [scene["subtitle"].strip() for scene in generated_item["scenes"]]
+                assert len(subtitles) >= 3
+                assert len(set(subtitles)) == len(subtitles), f"Repeated scene text for {scenario['idea']}"
+                assert all(subtitles[index] != subtitles[index - 1] for index in range(1, len(subtitles)))
+                generated_scenarios.append(generated_item)
+            assert len({item["script"] for item in generated_scenarios}) == len(generated_scenarios)
+            generated = generated_scenarios[1]
 
             image_path = root / "acceptance.png"
             generate_test_image(image_path)
@@ -166,6 +173,8 @@ def run() -> dict:
 
             return {
                 "scenes": len(scenes), "orientation": project_payload["orientation"],
+                "scenarioCount": len(generated_scenarios),
+                "testedOrientations": [scenario["orientation"] for scenario in scenarios],
                 "voice": voice["provider"], "renderBytes": len(video),
                 "subtitleBytes": len(subtitles), "credits": stock_cost["totalCredits"],
             }
