@@ -167,6 +167,8 @@ Owner hesabı proje kütüphanesindeki **Yönetim** düğmesinden toplam kullan�
 
 Owner aynı ekrandan yeni üye hesabı oluşturabilir, kredi ekleyip çıkarabilir, kullanıcıya özel proje/depolama/aylık render kotası tanımlayabilir ve hesabı pasifleştirebilir. Pasifleştirilen hesabın açık oturumları anında kapatılır; yönetici kendi hesabını pasifleştiremez ve kredi bakiyesi sıfırın altına indirilemez.
 
+Kullanıcı daveti, hesap/kota/kredi değişikliği ve parola yenileme bağlantısı üretimi yönetici işlem geçmişine kaydedilir. Kayıt; işlemi yapan yöneticiyi, hedef kullanıcıyı, zamanı ve güvenli değişiklik özetini içerir; parola veya bağlantı tokenı içermez.
+
 Yeni hesaplar geçici parola paylaşmak yerine 48 saat geçerli tek kullanımlık davet bağlantısıyla açılır. Owner mevcut kullanıcı için 2 saat geçerli parola yenileme bağlantısı da oluşturabilir. Tokenlar veritabanında düz biçimde değil SHA-256 özetiyle tutulur, ilk kullanımdan sonra geçersizleşir ve parola değiştiğinde kullanıcının diğer oturumları kapatılır. E-posta sağlayıcısı bağlanana kadar bağlantı yönetim panelinden kopyalanıp kullanıcıya iletilebilir.
 
 Yönetim ekranı ayrıca render kuyruğunu, disk doluluk oranını, son 24 saatteki render/ödeme/sistem hatalarını ve son sistem olaylarını gösterir. Beklenmeyen API ve render hataları SQLite içindeki sınırlı olay günlüğüne kaydedilir; yalnızca owner hesabına gösterilir. `/api/health` ayrıntı sızdırmadan `ok` veya `degraded` durumu ile kuyruk sayısını döndürür.

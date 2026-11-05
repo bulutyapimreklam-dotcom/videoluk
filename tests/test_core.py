@@ -292,6 +292,7 @@ class VideolukCoreTests(unittest.TestCase):
                         ("admin-credit", "member-1", stamp),
                     )
                 server.record_system_event("error", "test", "Kontrollü test hatası", {"secret": "yanıta çıkmamalı"})
+                server.record_admin_action(server.LOCAL_USER_ID, "member-1", "user.updated", {"creditAdjustment": 25})
                 overview = server.admin_overview()
                 self.assertEqual(1, overview["metrics"]["users"])
                 self.assertEqual(1, overview["metrics"]["projects"])
@@ -302,7 +303,12 @@ class VideolukCoreTests(unittest.TestCase):
                 self.assertEqual("degraded", overview["operations"]["status"])
                 self.assertEqual(1, overview["operations"]["errors24h"])
                 self.assertEqual("test", overview["events"][0]["source"])
+                self.assertEqual("user.updated", overview["audit"][0]["action"])
+                self.assertEqual("Yerel Kullanıcı", overview["audit"][0]["actor_name"])
+                self.assertEqual("Üye", overview["audit"][0]["target_name"])
+                self.assertEqual(25, overview["audit"][0]["details"]["creditAdjustment"])
                 self.assertNotIn("metadata", overview["events"][0])
+                self.assertNotIn("password_hash", overview["audit"][0])
                 self.assertNotIn("password_hash", overview["users"][0])
                 self.assertNotIn("token", overview["payments"][0])
         finally:

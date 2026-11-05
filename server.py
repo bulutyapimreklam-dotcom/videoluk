@@ -275,7 +275,18 @@ def initialize() -> None:
                 metadata TEXT,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS admin_audit_events (
+                id TEXT PRIMARY KEY,
+                actor_user_id TEXT NOT NULL,
+                target_user_id TEXT,
+                action TEXT NOT NULL,
+                details TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(actor_user_id) REFERENCES users(id),
+                FOREIGN KEY(target_user_id) REFERENCES users(id)
+            );
             CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at ON admin_audit_events(created_at DESC);
             """
         )
         project_columns = {row["name"] for row in connection.execute("PRAGMA table_info(projects)").fetchall()}
@@ -642,6 +653,18 @@ def update_managed_user(user_id: str, payload: dict, actor_id: str) -> dict:
     return {"id": user_id, "status": status, "limits": {"projects": projects, "storageGb": storage_gb, "monthlyRenders": renders}, "credits": balance + adjustment}
 
 
+def record_admin_action(actor_id: str, target_user_id: str | None, action: str, details: dict | None = None) -> None:
+    safe_details = json.dumps(details or {}, ensure_ascii=False)[:4000]
+    with DB_LOCK, db() as connection:
+        connection.execute(
+            "INSERT INTO admin_audit_events VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), actor_id, target_user_id, action[:80], safe_details, now()),
+        )
+        connection.execute(
+            "DELETE FROM admin_audit_events WHERE id NOT IN (SELECT id FROM admin_audit_events ORDER BY created_at DESC LIMIT 2000)"
+        )
+
+
 def send_webhook_alert(level: str, source: str, message: str) -> bool:
     if not ALERT_WEBHOOK_URL:
         return False
@@ -763,7 +786,21 @@ def admin_overview() -> dict:
         events = connection.execute(
             "SELECT id, level, source, message, created_at FROM system_events ORDER BY created_at DESC LIMIT 50"
         ).fetchall()
-    return {"metrics": metrics, "operations": operational_status(), "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders], "events": [dict(row) for row in events]}
+        audit = connection.execute(
+            "SELECT audit.id, audit.action, audit.details, audit.created_at, actor.name AS actor_name, actor.email AS actor_email, "
+            "target.name AS target_name, target.email AS target_email "
+            "FROM admin_audit_events AS audit JOIN users AS actor ON actor.id = audit.actor_user_id "
+            "LEFT JOIN users AS target ON target.id = audit.target_user_id ORDER BY audit.created_at DESC LIMIT 100"
+        ).fetchall()
+    audit_items = []
+    for row in audit:
+        item = dict(row)
+        try:
+            item["details"] = json.loads(item["details"] or "{}")
+        except json.JSONDecodeError:
+            item["details"] = {}
+        audit_items.append(item)
+    return {"metrics": metrics, "operations": operational_status(), "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders], "events": [dict(row) for row in events], "audit": audit_items}
 
 
 def estimate_project_cost(payload: dict) -> dict:
@@ -1932,21 +1969,30 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 owner = self.require_owner()
                 if not owner:
                     return
-                self.send_json(HTTPStatus.CREATED, create_managed_user(body))
+                created = create_managed_user(body)
+                record_admin_action(owner["id"], created["id"], "user.invited", {"email": created["email"], "status": created["status"]})
+                self.send_json(HTTPStatus.CREATED, created)
                 return
             if route.startswith("/api/admin/users/") and route.endswith("/update"):
                 owner = self.require_owner()
                 if not owner:
                     return
                 user_id = route.strip("/").split("/")[3]
-                self.send_json(HTTPStatus.OK, update_managed_user(user_id, body, owner["id"]))
+                updated = update_managed_user(user_id, body, owner["id"])
+                record_admin_action(owner["id"], user_id, "user.updated", {
+                    "status": updated["status"], "limits": updated["limits"],
+                    "creditAdjustment": int(body.get("creditAdjustment") or 0),
+                })
+                self.send_json(HTTPStatus.OK, updated)
                 return
             if route.startswith("/api/admin/users/") and route.endswith("/reset"):
                 owner = self.require_owner()
                 if not owner:
                     return
                 user_id = route.strip("/").split("/")[3]
-                self.send_json(HTTPStatus.CREATED, create_auth_token(user_id, "reset"))
+                reset = create_auth_token(user_id, "reset")
+                record_admin_action(owner["id"], user_id, "user.password_reset_link", {"expiresAt": reset["expiresAt"]})
+                self.send_json(HTTPStatus.CREATED, reset)
                 return
             if route == "/api/payments/iyzico/checkout":
                 result = initialize_credit_checkout(user, str(body.get("packageId") or ""), body.get("billing") or {}, self.client_address[0])
