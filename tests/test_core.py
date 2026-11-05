@@ -7,6 +7,35 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_account_deletion_request_requires_password_and_tracks_review(self):
+        originals = {
+            "DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES,
+            "MEDIA_CACHE": server.MEDIA_CACHE, "GENERATED_IMAGES": server.GENERATED_IMAGES,
+            "TRAINING_VIDEOS": server.TRAINING_VIDEOS, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH,
+            "AUTH_REQUIRED": server.AUTH_REQUIRED,
+        }
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root; server.OUTPUTS = root / "renders"; server.VOICES = root / "voices"
+                server.MEDIA_CACHE = root / "media-cache"; server.GENERATED_IMAGES = root / "generated-images"
+                server.TRAINING_VIDEOS = root / "training-videos"; server.UPLOADS = root / "uploads"
+                server.DB_PATH = root / "videoluk.db"; server.AUTH_REQUIRED = True
+                server.initialize()
+                member = server.create_managed_user({"name": "Silme Talebi", "email": "delete@example.com", "password": "guvenli-parola-123"})
+                with self.assertRaisesRegex(ValueError, "Parola"):
+                    server.create_deletion_request(member["id"], "yanlis-parola", "Deneme")
+                requested = server.create_deletion_request(member["id"], "guvenli-parola-123", "Hesabımı kapatıyorum")
+                self.assertEqual("requested", requested["status"])
+                owner = {"id": server.LOCAL_USER_ID, "role": "owner"}
+                reviewed = server.update_deletion_request(requested["id"], "in_review", owner)
+                self.assertEqual("in_review", reviewed["status"])
+                completed = server.update_deletion_request(requested["id"], "completed", owner, "Manuel doğrulama tamamlandı")
+                self.assertEqual("completed", completed["status"])
+        finally:
+            for name, value in originals.items():
+                setattr(server, name, value)
+
     def test_account_export_is_portable_and_excludes_secrets(self):
         originals = {
             "DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES,

@@ -295,8 +295,20 @@ def initialize() -> None:
                 FOREIGN KEY(actor_user_id) REFERENCES users(id),
                 FOREIGN KEY(target_user_id) REFERENCES users(id)
             );
+            CREATE TABLE IF NOT EXISTS account_deletion_requests (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                admin_note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                resolved_at TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at ON admin_audit_events(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_deletion_requests_user ON account_deletion_requests(user_id, created_at DESC);
             """
         )
         project_columns = {row["name"] for row in connection.execute("PRAGMA table_info(projects)").fetchall()}
@@ -774,6 +786,56 @@ def record_admin_action(actor_id: str, target_user_id: str | None, action: str, 
         )
 
 
+def deletion_request_for_user(user_id: str) -> dict | None:
+    with db() as connection:
+        row = connection.execute(
+            "SELECT id, status, reason, admin_note, created_at, updated_at, resolved_at FROM account_deletion_requests "
+            "WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def create_deletion_request(user_id: str, password: str, reason: str) -> dict:
+    with DB_LOCK, db() as connection:
+        user = connection.execute("SELECT password_hash, role FROM users WHERE id = ? AND status = 'active'", (user_id,)).fetchone()
+        if not user:
+            raise ValueError("Aktif kullanıcı bulunamadı")
+        if user["role"] == "owner":
+            raise ValueError("Owner hesabı silme talebiyle kapatılamaz; önce başka bir owner atanmalı")
+        if AUTH_REQUIRED and not verify_password(password, user["password_hash"]):
+            raise ValueError("Parola doğrulanamadı")
+        existing = connection.execute(
+            "SELECT id FROM account_deletion_requests WHERE user_id = ? AND status IN ('requested', 'in_review')", (user_id,),
+        ).fetchone()
+        if existing:
+            raise ValueError("Zaten açık bir hesap silme talebin var")
+        request_id, timestamp = str(uuid.uuid4()), now()
+        connection.execute(
+            "INSERT INTO account_deletion_requests VALUES (?, ?, 'requested', ?, '', ?, ?, NULL)",
+            (request_id, user_id, " ".join(reason.split())[:1000], timestamp, timestamp),
+        )
+    return deletion_request_for_user(user_id)
+
+
+def update_deletion_request(request_id: str, status: str, actor: dict, note: str = "") -> dict:
+    allowed = {"in_review", "completed", "rejected"} if actor.get("role") == "owner" else {"cancelled"}
+    if status not in allowed:
+        raise ValueError("Bu talep durumu değiştirilemez")
+    timestamp = now()
+    with DB_LOCK, db() as connection:
+        row = connection.execute("SELECT * FROM account_deletion_requests WHERE id = ?", (request_id,)).fetchone()
+        if not row or (actor.get("role") != "owner" and row["user_id"] != actor["id"]):
+            raise ValueError("Silme talebi bulunamadı")
+        if row["status"] not in {"requested", "in_review"}:
+            raise ValueError("Bu talep daha önce kapatılmış")
+        resolved_at = timestamp if status in {"completed", "rejected", "cancelled"} else None
+        connection.execute(
+            "UPDATE account_deletion_requests SET status = ?, admin_note = ?, updated_at = ?, resolved_at = ? WHERE id = ?",
+            (status, " ".join(note.split())[:1000] if actor.get("role") == "owner" else row["admin_note"], timestamp, resolved_at, request_id),
+        )
+    return {"id": request_id, "userId": row["user_id"], "status": status, "updatedAt": timestamp, "resolvedAt": resolved_at}
+
+
 def send_webhook_alert(level: str, source: str, message: str) -> bool:
     if not ALERT_WEBHOOK_URL:
         return False
@@ -902,6 +964,11 @@ def admin_overview() -> dict:
             "FROM admin_audit_events AS audit JOIN users AS actor ON actor.id = audit.actor_user_id "
             "LEFT JOIN users AS target ON target.id = audit.target_user_id ORDER BY audit.created_at DESC LIMIT 100"
         ).fetchall()
+        deletion_requests = connection.execute(
+            "SELECT requests.id, requests.status, requests.reason, requests.admin_note, requests.created_at, requests.updated_at, "
+            "users.id AS user_id, users.name, users.email FROM account_deletion_requests AS requests "
+            "JOIN users ON users.id = requests.user_id ORDER BY requests.created_at DESC LIMIT 100"
+        ).fetchall()
     audit_items = []
     for row in audit:
         item = dict(row)
@@ -910,7 +977,7 @@ def admin_overview() -> dict:
         except json.JSONDecodeError:
             item["details"] = {}
         audit_items.append(item)
-    return {"metrics": metrics, "operations": operational_status(), "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders], "events": [dict(row) for row in events], "audit": audit_items}
+    return {"metrics": metrics, "operations": operational_status(), "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders], "events": [dict(row) for row in events], "audit": audit_items, "deletionRequests": [dict(row) for row in deletion_requests]}
 
 
 def estimate_project_cost(payload: dict) -> dict:
@@ -2081,6 +2148,14 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 self.receive_training_video(params.get("profileId", ["default"])[0])
                 return
             body = self.read_json()
+            if route == "/api/account/deletion-request":
+                requested = create_deletion_request(user["id"], str(body.get("password") or ""), str(body.get("reason") or ""))
+                self.send_json(HTTPStatus.CREATED, requested)
+                return
+            if route.startswith("/api/account/deletion-request/") and route.endswith("/cancel"):
+                request_id = route.strip("/").split("/")[3]
+                self.send_json(HTTPStatus.OK, update_deletion_request(request_id, "cancelled", user))
+                return
             if route == "/api/admin/users":
                 owner = self.require_owner()
                 if not owner:
@@ -2113,6 +2188,16 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 reset["emailSent"] = deliver_account_email(user_id, reset)
                 record_admin_action(owner["id"], user_id, "user.password_reset_link", {"expiresAt": reset["expiresAt"], "emailSent": reset["emailSent"]})
                 self.send_json(HTTPStatus.CREATED, reset)
+                return
+            if route.startswith("/api/admin/deletion-requests/"):
+                owner = self.require_owner()
+                if not owner:
+                    return
+                request_id = route.rsplit("/", 1)[-1]
+                status = str(body.get("status") or "")
+                result = update_deletion_request(request_id, status, owner, str(body.get("note") or ""))
+                record_admin_action(owner["id"], result["userId"], f"account.deletion_{status}", {"requestId": request_id})
+                self.send_json(HTTPStatus.OK, result)
                 return
             if route == "/api/payments/iyzico/checkout":
                 result = initialize_credit_checkout(user, str(body.get("packageId") or ""), body.get("billing") or {}, self.client_address[0])
@@ -2362,6 +2447,9 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/usage":
             self.send_json(HTTPStatus.OK, user_usage(self.current_user()["id"]))
+            return
+        if route == "/api/account/deletion-request":
+            self.send_json(HTTPStatus.OK, {"request": deletion_request_for_user(self.current_user()["id"])})
             return
         if route == "/api/account/export":
             payload = json.dumps(account_data_export(self.current_user()["id"]), ensure_ascii=False, indent=2).encode("utf-8")

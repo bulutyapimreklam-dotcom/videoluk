@@ -180,5 +180,6 @@ Kredi paketleri, abonelik, ekip çalışma alanı, marka kiti, şablonlar, kulla
 - Docker/Caddy üretim paketi, özel beta erişim koruması ve GitHub doğrulama hattı
 - Ürün davranışıyla eşleşen KVKK/gizlilik, kullanım koşulları ve çerez-yerel depolama şeffaflık sayfaları
 - Kullanıcının hassas kimlik bilgilerini dışlaması garanti edilen taşınabilir hesap verisi dışa aktarımı
+- Parola doğrulamalı, iptal edilebilir ve yönetici denetim kayıtlı hesap silme talebi iş akışı
 
 Kurgu DNA eğitim katmanının sonraki geliştirmeleri ürün sahibinin isteğiyle ertelenmiştir. Mevcut profil ve geri bildirim altyapısı korunur; ana video üretim akışını engellemez.
