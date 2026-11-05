@@ -43,6 +43,12 @@ class OperationsTests(unittest.TestCase):
         for requirement in ("set -euo pipefail", "ufw default deny incoming", "fail2ban", "unattended-upgrades", "docker-ce", "chmod 600 /swapfile"):
             self.assertIn(requirement, script)
 
+    def test_pages_workflow_publishes_static_application(self):
+        workflow = (ROOT / ".github" / "workflows" / "pages.yaml").read_text(encoding="utf-8")
+        self.assertIn("actions/upload-pages-artifact@v3", workflow)
+        self.assertIn("path: dist", workflow)
+        self.assertIn("actions/deploy-pages@v4", workflow)
+
     def test_production_environment_validation(self):
         valid = {
             "VIDEOLUK_DOMAIN": "app.videoluk.com",
