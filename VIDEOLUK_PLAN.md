@@ -178,5 +178,6 @@ Kredi paketleri, abonelik, ekip çalışma alanı, marka kiti, şablonlar, kulla
 - Altyazı açma/kapama, stil ve konumun gerçek rendera aktarılması
 - Kuyruklu FFmpeg render, yeniden başlatma kurtarması, MP4 ve SRT indirme
 - Docker/Caddy üretim paketi, özel beta erişim koruması ve GitHub doğrulama hattı
+- Ürün davranışıyla eşleşen KVKK/gizlilik, kullanım koşulları ve çerez-yerel depolama şeffaflık sayfaları
 
 Kurgu DNA eğitim katmanının sonraki geliştirmeleri ürün sahibinin isteğiyle ertelenmiştir. Mevcut profil ve geri bildirim altyapısı korunur; ana video üretim akışını engellemez.

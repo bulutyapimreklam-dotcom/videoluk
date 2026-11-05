@@ -185,6 +185,8 @@ Editör; sahne başlığı ve seslendirme metni düzenleme, görsel istemini de�
 
 ## Beta güvenlik sınırları
 
+Uygulama altbilgisinde ürünün mevcut veri akışını açıklayan **Gizlilik & KVKK**, **Kullanım koşulları** ve **Çerezler ve yerel depolama** sayfaları bulunur. Bu metinler kapalı beta için teknik-hukuki taslaktır; ticari yayından önce veri sorumlusunun unvanı/adresi, başvuru kanalı, kategori bazlı saklama takvimi, fiilî yurt dışı sağlayıcıları ve ücret/iade politikası doldurulup hukuk uzmanı tarafından incelenmelidir.
+
 - API yalnızca aynı origin üzerinden erişime açıktır; ayrı bir web alanı kullanılacaksa `VIDEOLUK_ALLOWED_ORIGIN` açıkça tanımlanır.
 - JSON istek gövdeleri 1 MB, stok medya indirmeleri 200 MB, kullanıcı medyası 500 MB ve eğitim videosu başına yükleme varsayılan olarak 2 GB ile sınırlandırılır.
 - Üretim trafiği Caddy HTTPS ve Basic Auth katmanından geçer.

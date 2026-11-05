@@ -22,6 +22,22 @@ backup_data = load_script("backup_data")
 
 
 class OperationsTests(unittest.TestCase):
+    def test_legal_transparency_pages_are_linked_and_complete(self):
+        index = (ROOT / "dist" / "index.html").read_text(encoding="utf-8")
+        pages = ("gizlilik.html", "kullanim-kosullari.html", "cerezler.html")
+        for page in pages:
+            self.assertIn(f'href="{page}"', index)
+            content = (ROOT / "dist" / page).read_text(encoding="utf-8")
+            self.assertIn("Videoluk", content)
+            self.assertIn("5 Kasım 2026", content)
+            self.assertIn('href="./"', content)
+        privacy = (ROOT / "dist" / "gizlilik.html").read_text(encoding="utf-8")
+        self.assertIn("Veri sorumlusu", privacy)
+        self.assertIn("haklarınız", privacy)
+        cookies = (ROOT / "dist" / "cerezler.html").read_text(encoding="utf-8")
+        self.assertIn("videoluk_session", cookies)
+        self.assertIn("videoluk-draft", cookies)
+
     def test_ubuntu_bootstrap_has_required_hardening(self):
         script = (ROOT / "deploy" / "bootstrap-ubuntu.sh").read_text(encoding="utf-8")
         for requirement in ("set -euo pipefail", "ufw default deny incoming", "fail2ban", "unattended-upgrades", "docker-ce", "chmod 600 /swapfile"):
