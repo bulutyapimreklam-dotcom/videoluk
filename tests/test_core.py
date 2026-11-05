@@ -7,6 +7,43 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_voice_falls_back_to_default_macos_voice(self):
+        originals = {"VOICES": server.VOICES, "FFMPEG": server.FFMPEG, "which": server.shutil.which, "run": server.subprocess.run}
+        calls = []
+
+        class Result:
+            def __init__(self, returncode=0):
+                self.returncode = returncode
+                self.stderr = ""
+
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                server.VOICES = Path(temporary)
+                server.shutil.which = lambda command: "/usr/bin/say" if command == "say" else None
+
+                def fake_run(command, **_kwargs):
+                    calls.append(command)
+                    if command[0] == "say" and "Yelda" in command:
+                        return Result(1)
+                    output = Path(command[command.index("-o") + 1]) if command[0] == "say" else Path(command[-1])
+                    output.write_bytes(b"0" * 2048)
+                    return Result()
+
+                server.subprocess.run = fake_run
+                voice = server.generate_voice("Varsayılan sesle devam et")
+                self.assertEqual("system-tts", voice["provider"])
+                self.assertEqual("Yelda", calls[0][2])
+                self.assertEqual("say", calls[1][0])
+                self.assertNotIn("-v", calls[1])
+        finally:
+            for name, value in originals.items():
+                if name == "which":
+                    server.shutil.which = value
+                elif name == "run":
+                    server.subprocess.run = value
+                else:
+                    setattr(server, name, value)
+
     def test_password_hash_is_salted_and_verifiable(self):
         first = server.hash_password("uzun-guvenli-parola")
         second = server.hash_password("uzun-guvenli-parola")

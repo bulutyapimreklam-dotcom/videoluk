@@ -1351,9 +1351,13 @@ def generate_voice(text: str) -> dict:
     result = None
     if shutil.which("say"):
         intermediate = VOICES / f"{voice_id}.aiff"
-        result = subprocess.run(["say", "-v", "Yelda", "-o", str(intermediate), clean_text], capture_output=True, text=True)
-        if result.returncode == 0:
-            result = subprocess.run([FFMPEG, "-y", "-i", str(intermediate), "-ar", "44100", "-ac", "2", str(target)], capture_output=True, text=True)
+        for voice_arguments in (["-v", "Yelda"], []):
+            intermediate.unlink(missing_ok=True)
+            result = subprocess.run(["say", *voice_arguments, "-o", str(intermediate), clean_text], capture_output=True, text=True)
+            if result.returncode == 0 and intermediate.is_file():
+                result = subprocess.run([FFMPEG, "-y", "-i", str(intermediate), "-ar", "44100", "-ac", "2", str(target)], capture_output=True, text=True)
+            if result.returncode == 0 and target.is_file() and target.stat().st_size >= 1024:
+                break
         intermediate.unlink(missing_ok=True)
     if (result is None or result.returncode != 0 or not target.is_file() or target.stat().st_size < 1024) and shutil.which("espeak-ng"):
         target.unlink(missing_ok=True)
@@ -1809,7 +1813,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def send_file(self, path: Path) -> None:
-        if not path.is_file() or OUTPUTS not in path.resolve().parents:
+        if not path.is_file() or OUTPUTS.resolve() not in path.resolve().parents:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         self.send_response(HTTPStatus.OK)
