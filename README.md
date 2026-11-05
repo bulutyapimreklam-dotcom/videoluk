@@ -1,5 +1,7 @@
 # Videoluk
 
+Videoluk marka sistemi, kurgu katmanları ile oynatma işaretini birleştiren özgün vektör logomarkı; koyu orman yeşili, kontrollü lime vurgu ve sade nötr yüzeyler üzerine kuruludur. `dist/videoluk-mark.svg` favicon ve uygulama markası olarak, `dist/brand-system.css` ise ortak erişilebilir arayüz standardı olarak kullanılır.
+
 Videoluk, metin ve sahnelerden kendi sunucusunda video oluşturan bağımsız video stüdyosudur. Bu depo ilk çalışan CPU tabanlı MVP çekirdeğini içerir.
 
 ## Kurgu Beyni ve Kurgu DNA'sı

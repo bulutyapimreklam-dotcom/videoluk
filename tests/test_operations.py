@@ -31,12 +31,25 @@ class OperationsTests(unittest.TestCase):
             self.assertIn("Videoluk", content)
             self.assertIn("5 Kasım 2026", content)
             self.assertIn('href="./"', content)
+            self.assertIn('href="videoluk-mark.svg"', content)
+            self.assertIn('href="brand-system.css?v=1"', content)
         privacy = (ROOT / "dist" / "gizlilik.html").read_text(encoding="utf-8")
         self.assertIn("Veri sorumlusu", privacy)
         self.assertIn("haklarınız", privacy)
         cookies = (ROOT / "dist" / "cerezler.html").read_text(encoding="utf-8")
         self.assertIn("videoluk_session", cookies)
         self.assertIn("videoluk-draft", cookies)
+
+    def test_brand_assets_are_connected_to_application(self):
+        index = (ROOT / "dist" / "index.html").read_text(encoding="utf-8")
+        mark = (ROOT / "dist" / "videoluk-mark.svg").read_text(encoding="utf-8")
+        styles = (ROOT / "dist" / "brand-system.css").read_text(encoding="utf-8")
+        self.assertIn('rel="icon" href="videoluk-mark.svg"', index)
+        self.assertIn('href="brand-system.css?v=1"', index)
+        self.assertIn("<svg", mark)
+        self.assertIn("#d8ff6a", mark)
+        self.assertIn(":focus-visible", styles)
+        self.assertIn("videoluk-mark.svg", styles)
 
     def test_ubuntu_bootstrap_has_required_hardening(self):
         script = (ROOT / "deploy" / "bootstrap-ubuntu.sh").read_text(encoding="utf-8")

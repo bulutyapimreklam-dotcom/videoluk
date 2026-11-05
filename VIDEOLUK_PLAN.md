@@ -18,6 +18,8 @@ Her otomatik sahne kararı `editingReason` alanıyla açıklanır. Böylece kull
 
 ## Marka sistemi
 
+Uygulanan görsel kimlik: kurgu katmanları ve oynatma işaretini birleştiren Videoluk logomarkı; koyu orman yeşili ana renk, lime üretim vurgusu, mercan ikincil vurgu, sakin nötr yüzeyler ve Manrope/DM Sans tipografi sistemi. Arayüz genelinde ortak odak halkaları, yüzeyler, buton davranışları ve responsive ölçüler kullanılır.
+
 - Ürün adı: Videoluk
 - Web uygulaması: app.videoluk.com
 - Tanıtım sitesi: videoluk.com
