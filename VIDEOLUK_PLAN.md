@@ -172,6 +172,7 @@ Kredi paketleri, abonelik, ekip çalışma alanı, marka kiti, şablonlar, kulla
 - Sağlayıcıdan bağımsız HTTPS webhook hata alarmı, Bearer yetkilendirmesi ve tekrar bildirim koruması
 - Owner tarafından kullanıcı oluşturma, kredi düzenleme, kullanıcıya özel kota ve hesap pasifleştirme
 - Hash saklanan, tek kullanımlık ve süreli kullanıcı daveti/parola yenileme bağlantıları
+- SMTP yapılandırıldığında davet ve parola yenileme bağlantılarını otomatik gönderen, hatada manuel bağlantıyı koruyan e-posta katmanı
 - Kritik yönetici işlemleri için aktör, hedef, zaman ve değişiklik ayrıntılarını tutan denetim kaydı
 - Üretim Docker imajında fikirden MP4/SRT indirmeye kadar çalışan ana akışı doğrulayan uçtan uca kabul testi
 - Altyazı açma/kapama, stil ve konumun gerçek rendera aktarılması

@@ -7,6 +7,76 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_account_email_uses_smtp_without_exposing_credentials(self):
+        originals = {
+            "DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES,
+            "MEDIA_CACHE": server.MEDIA_CACHE, "GENERATED_IMAGES": server.GENERATED_IMAGES,
+            "TRAINING_VIDEOS": server.TRAINING_VIDEOS, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH,
+            "PUBLIC_BASE_URL": server.PUBLIC_BASE_URL, "SMTP_HOST": server.SMTP_HOST,
+            "SMTP_PORT": server.SMTP_PORT, "SMTP_USER": server.SMTP_USER,
+            "SMTP_PASSWORD": server.SMTP_PASSWORD, "SMTP_FROM": server.SMTP_FROM,
+            "SMTP_SECURITY": server.SMTP_SECURITY, "SMTP": server.smtplib.SMTP,
+        }
+        clients = []
+
+        class FakeSmtp:
+            def __init__(self, host, port, timeout):
+                self.host, self.port, self.timeout = host, port, timeout
+                self.started_tls = False
+                self.login_args = None
+                self.message = None
+                clients.append(self)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def starttls(self, context):
+                self.started_tls = context is not None
+
+            def login(self, user, password):
+                self.login_args = (user, password)
+
+            def send_message(self, message):
+                self.message = message
+
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root
+                server.OUTPUTS = root / "renders"
+                server.VOICES = root / "voices"
+                server.MEDIA_CACHE = root / "media-cache"
+                server.GENERATED_IMAGES = root / "generated-images"
+                server.TRAINING_VIDEOS = root / "training-videos"
+                server.UPLOADS = root / "uploads"
+                server.DB_PATH = root / "videoluk.db"
+                server.initialize()
+                user = server.create_managed_user({"name": "E-posta Üyesi", "email": "uye@example.com"})
+                server.PUBLIC_BASE_URL = "https://app.videoluk.test"
+                server.SMTP_HOST = "smtp.example.test"
+                server.SMTP_PORT = 587
+                server.SMTP_USER = "smtp-user"
+                server.SMTP_PASSWORD = "smtp-secret"
+                server.SMTP_FROM = "Videoluk <hesap@videoluk.test>"
+                server.SMTP_SECURITY = "starttls"
+                server.smtplib.SMTP = FakeSmtp
+                self.assertTrue(server.deliver_account_email(user["id"], user["activation"]))
+                client = clients[0]
+                self.assertTrue(client.started_tls)
+                self.assertEqual(("smtp-user", "smtp-secret"), client.login_args)
+                self.assertEqual("uye@example.com", client.message["To"])
+                self.assertIn("https://app.videoluk.test/?authToken=", client.message.get_content())
+                self.assertNotIn("smtp-secret", client.message.as_string())
+        finally:
+            for name, value in originals.items():
+                if name == "SMTP":
+                    server.smtplib.SMTP = value
+                else:
+                    setattr(server, name, value)
+
     def test_voice_falls_back_to_default_macos_voice(self):
         originals = {"VOICES": server.VOICES, "FFMPEG": server.FFMPEG, "which": server.shutil.which, "run": server.subprocess.run}
         calls = []

@@ -16,6 +16,8 @@ import base64
 import binascii
 import hmac
 import secrets
+import smtplib
+import ssl
 from concurrent.futures import ThreadPoolExecutor
 import shutil
 import sqlite3
@@ -29,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -75,6 +78,13 @@ IYZICO_API_KEY = os.getenv("VIDEOLUK_IYZICO_API_KEY", "")
 IYZICO_SECRET_KEY = os.getenv("VIDEOLUK_IYZICO_SECRET_KEY", "")
 IYZICO_BASE_URL = os.getenv("VIDEOLUK_IYZICO_BASE_URL", "https://sandbox-api.iyzipay.com").rstrip("/")
 PUBLIC_BASE_URL = os.getenv("VIDEOLUK_PUBLIC_BASE_URL", "").rstrip("/")
+SMTP_HOST = os.getenv("VIDEOLUK_SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("VIDEOLUK_SMTP_PORT", "587"))
+SMTP_USER = os.getenv("VIDEOLUK_SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("VIDEOLUK_SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("VIDEOLUK_SMTP_FROM", "").strip()
+SMTP_SECURITY = os.getenv("VIDEOLUK_SMTP_SECURITY", "starttls").strip().lower()
+SMTP_TIMEOUT = max(3, min(60, int(os.getenv("VIDEOLUK_SMTP_TIMEOUT", "15"))))
 CREDIT_PACKAGES = {
     "mini": {"name": "Başlangıç", "credits": 100, "price": "199.00"},
     "creator": {"name": "Üretici", "credits": 500, "price": "799.00"},
@@ -393,6 +403,47 @@ def create_auth_token(user_id: str, purpose: str) -> dict:
             (str(uuid.uuid4()), user_id, session_token_hash(token), purpose, expires_at, created_at),
         )
     return {"token": token, "purpose": purpose, "expiresAt": expires_at, "path": f"/?authToken={quote(token)}"}
+
+
+def email_delivery_ready() -> bool:
+    return bool(SMTP_HOST and SMTP_FROM and PUBLIC_BASE_URL.startswith(("https://", "http://localhost", "http://127.0.0.1")))
+
+
+def deliver_account_email(user_id: str, activation: dict) -> bool:
+    if not email_delivery_ready():
+        return False
+    if SMTP_SECURITY not in {"starttls", "ssl", "none"}:
+        record_system_event("warning", "email", "SMTP güvenlik modu geçersiz", {"purpose": activation.get("purpose")})
+        return False
+    with db() as connection:
+        user = connection.execute("SELECT email, name FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        return False
+    purpose = str(activation.get("purpose") or "invite")
+    is_invite = purpose == "invite"
+    action = "Videoluk hesabını aç" if is_invite else "Videoluk parolanı yenile"
+    validity = "48 saat" if is_invite else "2 saat"
+    link = f"{PUBLIC_BASE_URL}{activation['path']}"
+    message = EmailMessage()
+    message["Subject"] = action
+    message["From"] = SMTP_FROM
+    message["To"] = user["email"]
+    message.set_content(
+        f"Merhaba {user['name']},\n\n{action} için aşağıdaki tek kullanımlık bağlantıyı aç:\n\n"
+        f"{link}\n\nBu bağlantı {validity} geçerlidir. Bu işlemi sen istemediysen mesajı yok sayabilirsin.\n\nVideoluk"
+    )
+    try:
+        smtp_class = smtplib.SMTP_SSL if SMTP_SECURITY == "ssl" else smtplib.SMTP
+        with smtp_class(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) as client:
+            if SMTP_SECURITY == "starttls":
+                client.starttls(context=ssl.create_default_context())
+            if SMTP_USER:
+                client.login(SMTP_USER, SMTP_PASSWORD)
+            client.send_message(message)
+        return True
+    except (OSError, smtplib.SMTPException, ssl.SSLError):
+        record_system_event("warning", "email", "Hesap e-postası gönderilemedi; bağlantı yönetim panelinde hazır", {"purpose": purpose})
+        return False
 
 
 def inspect_auth_token(token: str) -> dict:
@@ -749,6 +800,7 @@ def operational_status() -> dict:
         "disk": {"usedBytes": disk.used, "totalBytes": disk.total, "percent": disk_percent},
         "alerts": alerts,
         "notificationsConfigured": bool(ALERT_WEBHOOK_URL),
+        "emailConfigured": email_delivery_ready(),
     }
 
 
@@ -1974,7 +2026,10 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 if not owner:
                     return
                 created = create_managed_user(body)
-                record_admin_action(owner["id"], created["id"], "user.invited", {"email": created["email"], "status": created["status"]})
+                email_sent = deliver_account_email(created["id"], created["activation"]) if created.get("activation") else False
+                if created.get("activation"):
+                    created["activation"]["emailSent"] = email_sent
+                record_admin_action(owner["id"], created["id"], "user.invited", {"email": created["email"], "status": created["status"], "emailSent": email_sent})
                 self.send_json(HTTPStatus.CREATED, created)
                 return
             if route.startswith("/api/admin/users/") and route.endswith("/update"):
@@ -1995,7 +2050,8 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                     return
                 user_id = route.strip("/").split("/")[3]
                 reset = create_auth_token(user_id, "reset")
-                record_admin_action(owner["id"], user_id, "user.password_reset_link", {"expiresAt": reset["expiresAt"]})
+                reset["emailSent"] = deliver_account_email(user_id, reset)
+                record_admin_action(owner["id"], user_id, "user.password_reset_link", {"expiresAt": reset["expiresAt"], "emailSent": reset["emailSent"]})
                 self.send_json(HTTPStatus.CREATED, reset)
                 return
             if route == "/api/payments/iyzico/checkout":

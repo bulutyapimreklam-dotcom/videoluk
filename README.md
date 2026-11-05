@@ -169,7 +169,9 @@ Owner aynı ekrandan yeni üye hesabı oluşturabilir, kredi ekleyip çıkarabil
 
 Kullanıcı daveti, hesap/kota/kredi değişikliği ve parola yenileme bağlantısı üretimi yönetici işlem geçmişine kaydedilir. Kayıt; işlemi yapan yöneticiyi, hedef kullanıcıyı, zamanı ve güvenli değişiklik özetini içerir; parola veya bağlantı tokenı içermez.
 
-Yeni hesaplar geçici parola paylaşmak yerine 48 saat geçerli tek kullanımlık davet bağlantısıyla açılır. Owner mevcut kullanıcı için 2 saat geçerli parola yenileme bağlantısı da oluşturabilir. Tokenlar veritabanında düz biçimde değil SHA-256 özetiyle tutulur, ilk kullanımdan sonra geçersizleşir ve parola değiştiğinde kullanıcının diğer oturumları kapatılır. E-posta sağlayıcısı bağlanana kadar bağlantı yönetim panelinden kopyalanıp kullanıcıya iletilebilir.
+Yeni hesaplar geçici parola paylaşmak yerine 48 saat geçerli tek kullanımlık davet bağlantısıyla açılır. Owner mevcut kullanıcı için 2 saat geçerli parola yenileme bağlantısı da oluşturabilir. Tokenlar veritabanında düz biçimde değil SHA-256 özetiyle tutulur, ilk kullanımdan sonra geçersizleşir ve parola değiştiğinde kullanıcının diğer oturumları kapatılır. SMTP ayarları girildiğinde bağlantılar otomatik e-postalanır; sağlayıcı tanımlı değilse veya gönderim başarısızsa bağlantı yönetim panelinden güvenle kopyalanabilir.
+
+E-posta teslimi sağlayıcıdan bağımsızdır. `.env` içinde `VIDEOLUK_SMTP_HOST`, `VIDEOLUK_SMTP_PORT`, `VIDEOLUK_SMTP_FROM` ve gerekiyorsa kullanıcı/parola tanımlanır. `VIDEOLUK_SMTP_SECURITY` için `starttls`, `ssl` veya yalnız güvenilir iç ağlarda `none` kullanılabilir. Otomatik gönderim için `VIDEOLUK_PUBLIC_BASE_URL` kullanıcıların erişebileceği uygulama adresi olmalıdır.
 
 Yönetim ekranı ayrıca render kuyruğunu, disk doluluk oranını, son 24 saatteki render/ödeme/sistem hatalarını ve son sistem olaylarını gösterir. Beklenmeyen API ve render hataları SQLite içindeki sınırlı olay günlüğüne kaydedilir; yalnızca owner hesabına gösterilir. `/api/health` ayrıntı sızdırmadan `ok` veya `degraded` durumu ile kuyruk sayısını döndürür.
 
