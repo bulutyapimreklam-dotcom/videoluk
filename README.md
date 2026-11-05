@@ -131,6 +131,7 @@ Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM v
 - `POST /api/admin/users/:id/reset` (yalnızca `owner` rolü)
 - `GET /api/auth/token?token=:token`
 - `POST /api/auth/password`
+- `POST /api/auth/forgot-password`
 - `POST /api/scripts/generate`
 - `GET /api/editing-profiles`
 - `POST /api/editing-profiles`
@@ -180,6 +181,8 @@ Kullanıcı daveti, hesap/kota/kredi değişikliği ve parola yenileme bağlant�
 Yeni hesaplar geçici parola paylaşmak yerine 48 saat geçerli tek kullanımlık davet bağlantısıyla açılır. Owner mevcut kullanıcı için 2 saat geçerli parola yenileme bağlantısı da oluşturabilir. Tokenlar veritabanında düz biçimde değil SHA-256 özetiyle tutulur, ilk kullanımdan sonra geçersizleşir ve parola değiştiğinde kullanıcının diğer oturumları kapatılır. SMTP ayarları girildiğinde bağlantılar otomatik e-postalanır; sağlayıcı tanımlı değilse veya gönderim başarısızsa bağlantı yönetim panelinden güvenle kopyalanabilir.
 
 E-posta teslimi sağlayıcıdan bağımsızdır. `.env` içinde `VIDEOLUK_SMTP_HOST`, `VIDEOLUK_SMTP_PORT`, `VIDEOLUK_SMTP_FROM` ve gerekiyorsa kullanıcı/parola tanımlanır. `VIDEOLUK_SMTP_SECURITY` için `starttls`, `ssl` veya yalnız güvenilir iç ağlarda `none` kullanılabilir. Otomatik gönderim için `VIDEOLUK_PUBLIC_BASE_URL` kullanıcıların erişebileceği uygulama adresi olmalıdır.
+
+Giriş ekranındaki **Parolamı unuttum** akışı, hesabın varlığını açıklamayan sabit yanıt üretir ve aynı IP/e-posta birleşimi için varsayılan beş dakikalık hız sınırı uygular. SMTP tanımlıysa iki saat geçerli tek kullanımlık bağlantı otomatik gönderilir. Süre `VIDEOLUK_PASSWORD_RESET_COOLDOWN_SECONDS` ile değiştirilebilir.
 
 Yönetim ekranı ayrıca render kuyruğunu, disk doluluk oranını, son 24 saatteki render/ödeme/sistem hatalarını ve son sistem olaylarını gösterir. Beklenmeyen API ve render hataları SQLite içindeki sınırlı olay günlüğüne kaydedilir; yalnızca owner hesabına gösterilir. `/api/health` ayrıntı sızdırmadan `ok` veya `degraded` durumu ile kuyruk sayısını döndürür.
 

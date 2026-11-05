@@ -139,6 +139,14 @@ class VideolukCoreTests(unittest.TestCase):
                 self.assertEqual("uye@example.com", client.message["To"])
                 self.assertIn("https://app.videoluk.test/?authToken=", client.message.get_content())
                 self.assertNotIn("smtp-secret", client.message.as_string())
+                with server.db() as connection:
+                    connection.execute("UPDATE users SET status = 'active' WHERE id = ?", (user["id"],))
+                server.PASSWORD_RESET_LAST_SENT.clear()
+                self.assertTrue(server.request_password_reset("UYE@example.com", "127.0.0.1"))
+                self.assertFalse(server.request_password_reset("uye@example.com", "127.0.0.1"))
+                self.assertFalse(server.request_password_reset("yok@example.com", "127.0.0.2"))
+                self.assertEqual(2, len(clients))
+                self.assertIn("parolanı yenile", clients[-1].message["Subject"].lower())
         finally:
             for name, value in originals.items():
                 if name == "SMTP":

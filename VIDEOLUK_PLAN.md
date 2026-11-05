@@ -181,5 +181,6 @@ Kredi paketleri, abonelik, ekip çalışma alanı, marka kiti, şablonlar, kulla
 - Ürün davranışıyla eşleşen KVKK/gizlilik, kullanım koşulları ve çerez-yerel depolama şeffaflık sayfaları
 - Kullanıcının hassas kimlik bilgilerini dışlaması garanti edilen taşınabilir hesap verisi dışa aktarımı
 - Parola doğrulamalı, iptal edilebilir ve yönetici denetim kayıtlı hesap silme talebi iş akışı
+- Hesap varlığını sızdırmayan, hız sınırlı ve e-posta teslimli self-servis parola yenileme akışı
 
 Kurgu DNA eğitim katmanının sonraki geliştirmeleri ürün sahibinin isteğiyle ertelenmiştir. Mevcut profil ve geri bildirim altyapısı korunur; ana video üretim akışını engellemez.

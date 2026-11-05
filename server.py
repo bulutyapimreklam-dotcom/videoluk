@@ -99,6 +99,9 @@ ALERT_COOLDOWN_SECONDS = max(60, int(os.getenv("VIDEOLUK_ALERT_COOLDOWN_SECONDS"
 DB_LOCK = threading.Lock()
 ALERT_LOCK = threading.Lock()
 ALERT_LAST_SENT: dict[str, float] = {}
+PASSWORD_RESET_LOCK = threading.Lock()
+PASSWORD_RESET_LAST_SENT: dict[str, float] = {}
+PASSWORD_RESET_COOLDOWN_SECONDS = max(60, int(os.getenv("VIDEOLUK_PASSWORD_RESET_COOLDOWN_SECONDS", "300")))
 RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=RENDER_WORKERS, thread_name_prefix="videoluk-render")
 ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videoluk-analysis")
 ALERT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videoluk-alert")
@@ -456,6 +459,30 @@ def deliver_account_email(user_id: str, activation: dict) -> bool:
     except (OSError, smtplib.SMTPException, ssl.SSLError):
         record_system_event("warning", "email", "Hesap e-postası gönderilemedi; bağlantı yönetim panelinde hazır", {"purpose": purpose})
         return False
+
+
+def request_password_reset(email: str, client_key: str) -> bool:
+    normalized = email.strip().lower()[:254]
+    rate_key = hashlib.sha256(f"{client_key}:{normalized}".encode("utf-8")).hexdigest()
+    with PASSWORD_RESET_LOCK:
+        current = time.monotonic()
+        last = PASSWORD_RESET_LAST_SENT.get(rate_key)
+        if last is not None and current - last < PASSWORD_RESET_COOLDOWN_SECONDS:
+            return False
+        PASSWORD_RESET_LAST_SENT[rate_key] = current
+        if len(PASSWORD_RESET_LAST_SENT) > 5000:
+            threshold = current - PASSWORD_RESET_COOLDOWN_SECONDS
+            stale = [key for key, value in PASSWORD_RESET_LAST_SENT.items() if value < threshold]
+            for key in stale:
+                PASSWORD_RESET_LAST_SENT.pop(key, None)
+    with db() as connection:
+        row = connection.execute(
+            "SELECT id FROM users WHERE email = ? AND status = 'active' AND password_hash != 'disabled'", (normalized,)
+        ).fetchone()
+    if not row:
+        return False
+    activation = create_auth_token(row["id"], "reset")
+    return deliver_account_email(row["id"], activation)
 
 
 def inspect_auth_token(token: str) -> dict:
@@ -2136,6 +2163,11 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 body = self.read_json()
                 result = complete_auth_token(str(body.get("token") or ""), str(body.get("password") or ""))
                 self.send_json(HTTPStatus.OK, result)
+                return
+            if route == "/api/auth/forgot-password":
+                body = self.read_json()
+                request_password_reset(str(body.get("email") or ""), self.client_address[0])
+                self.send_json(HTTPStatus.OK, {"message": "Hesap uygunsa parola yenileme bağlantısı e-posta adresine gönderildi"})
                 return
             user = self.require_user()
             if not user:
