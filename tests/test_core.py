@@ -155,7 +155,7 @@ class VideolukCoreTests(unittest.TestCase):
                     setattr(server, name, value)
 
     def test_voice_falls_back_to_default_macos_voice(self):
-        originals = {"VOICES": server.VOICES, "FFMPEG": server.FFMPEG, "which": server.shutil.which, "run": server.subprocess.run}
+        originals = {"VOICES": server.VOICES, "FFMPEG": server.FFMPEG, "EDGE_TTS": server.EDGE_TTS, "which": server.shutil.which, "run": server.subprocess.run, "valid_audio_file": server.valid_audio_file}
         calls = []
 
         class Result:
@@ -166,7 +166,9 @@ class VideolukCoreTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as temporary:
                 server.VOICES = Path(temporary)
+                server.EDGE_TTS = Path(temporary) / "missing-edge-tts"
                 server.shutil.which = lambda command: "/usr/bin/say" if command == "say" else None
+                server.valid_audio_file = lambda path: path.is_file() and path.stat().st_size >= 1024
 
                 def fake_run(command, **_kwargs):
                     calls.append(command)
@@ -190,6 +192,26 @@ class VideolukCoreTests(unittest.TestCase):
                     server.subprocess.run = value
                 else:
                     setattr(server, name, value)
+
+    def test_biography_script_has_distinct_scenes_and_verified_portrait(self):
+        original = server.fetch_wikipedia_summary
+        try:
+            server.fetch_wikipedia_summary = lambda _subject: {
+                "title": "Örnek Kişi",
+                "extract": (
+                    "Örnek Kişi 1925 yılında doğdu. Eğitimini Ankara'da tamamladı. "
+                    "Siyasi yaşama genç yaşta katıldı. Ülkenin dönüşüm yıllarında önemli görevler üstlendi. "
+                    "Toplumsal uzlaşmayı savundu. Çalışmaları sonraki kuşaklar üzerinde iz bıraktı."
+                ),
+                "url": "https://tr.wikipedia.org/wiki/%C3%96rnek_Ki%C5%9Fi",
+                "image": "https://upload.wikimedia.org/example-person.jpg",
+            }
+            result = server.generate_biography_script({"idea": "Örnek Kişi biyografisi", "duration": 30}, "Örnek Kişi")
+        finally:
+            server.fetch_wikipedia_summary = original
+        self.assertEqual(3, len(result["scenes"]))
+        self.assertEqual(3, len({scene["mediaQuery"] for scene in result["scenes"]}))
+        self.assertEqual("https://upload.wikimedia.org/example-person.jpg", result["scenes"][0]["suggestedMedia"]["imageUrl"])
 
     def test_password_hash_is_salted_and_verifiable(self):
         first = server.hash_password("uzun-guvenli-parola")

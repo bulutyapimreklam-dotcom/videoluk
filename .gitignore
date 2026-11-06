@@ -3,5 +3,7 @@ backups/
 __pycache__/
 .gh-config/
 .env
+.venv/
+demo-output/
 *.pyc
 .DS_Store

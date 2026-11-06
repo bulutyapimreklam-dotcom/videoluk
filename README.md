@@ -19,10 +19,12 @@ Arayüzde **Kurgu DNA'sı → Düzenle** bölümünden ana profil tanımlanır. 
 
 ## Yerelde çalıştırma
 
-Gereksinimler: Python 3.11+ ve FFmpeg.
+Gereksinimler: Python 3.11+ ve FFmpeg. İlk çalıştırmada yerel Türkçe ses motorunu kurun:
 
 ```bash
-python3 server.py
+chmod +x scripts/setup_local.sh
+./scripts/setup_local.sh
+.venv/bin/python server.py
 ```
 
 Ardından `http://127.0.0.1:8787` adresini açın.
@@ -117,7 +119,9 @@ Pexels üzerinden ücretsiz stok video aramak için `.env` dosyasına `VIDEOLUK_
 
 Sahne oluşturma artık seçilen kaynağa göre medyayı otomatik hazırlar. **Stok görüntü** seçilirse her sahne için Pexels/Wikimedia aranır. **Yapay zekâ** seçilirse `VIDEOLUK_IMAGE_URL`, `VIDEOLUK_IMAGE_MODEL` ve `VIDEOLUK_IMAGE_API_KEY` ile tanımlanan OpenAI uyumlu görsel servisi kullanılır. Görsel motoru bağlı değilse üretim durmaz; sistem bunu arayüzde bildirip otomatik olarak ücretsiz stok medyaya geçer. Üretilen görseller sunucudaki kalıcı veri alanında saklanır ve render motoruna yerel dosya olarak aktarılır.
 
-Seslendirme sunucuda üretilir. macOS geliştirme ortamında sistemdeki `say`, Docker imajında ise açık kaynak `espeak-ng` kullanılır. Üretilen WAV dosyası proje renderına otomatik eklenir.
+Seslendirme sunucuda üretilir. Yerel kurulumda doğal Türkçe ses için `edge-tts`, macOS'ta yedek olarak `say`, Docker imajında ise açık kaynak `espeak-ng` kullanılır. Ses dosyasının gerçekten oynatılabilir ve süreli olduğu FFprobe ile doğrulanır; üretilen WAV proje renderına otomatik eklenir.
+
+Altyazı filtresi bulunan FFmpeg kurulumlarında seçilen altyazı stili görüntüye yakılır. Filtre bulunmayan kurulumlarda altyazı atlanmaz; MP4 içine açılıp kapatılabilir Türkçe altyazı akışı gömülür ve SRT dosyası ayrıca indirilebilir.
 
 Kullanıcılar editörün medya kütüphanesine JPG, PNG, WEBP, MP4, MOV, WEBM ve MKV dosyaları yükleyebilir; yüklemeler yalnızca kendi hesaplarına görünür ve sahnelere atanabilir. MP3, WAV, M4A, AAC, OGG ve FLAC müzikler timeline'daki müzik kanalına eklenir, ses seviyesi seçilir ve seslendirmeyle FFmpeg üzerinde mikslenir. Dosyalar uzantının yanı sıra FFprobe ile içerik türü açısından da doğrulanır. Dosya başına varsayılan sınır 500 MB'dir; `VIDEOLUK_MAX_UPLOAD_BYTES` ile değiştirilebilir.
 

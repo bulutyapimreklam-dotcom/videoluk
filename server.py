@@ -105,6 +105,7 @@ PASSWORD_RESET_COOLDOWN_SECONDS = max(60, int(os.getenv("VIDEOLUK_PASSWORD_RESET
 RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=RENDER_WORKERS, thread_name_prefix="videoluk-render")
 ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videoluk-analysis")
 ALERT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videoluk-alert")
+EDGE_TTS = ROOT / ".venv" / "bin" / "edge-tts"
 
 
 def ffmpeg_has_filter(filter_name: str) -> bool:
@@ -961,7 +962,7 @@ def production_readiness() -> dict:
         {"id": "text", "category": "İçerik", "label": "Yapay zekâ metin sağlayıcısı", "ready": bool(LLM_URL and LLM_MODEL), "betaRequired": False, "commercialRequired": False, "detail": "Eksikse yerel metin motoru çalışır; kalite testi için sağlayıcı önerilir."},
         {"id": "image", "category": "İçerik", "label": "Yapay zekâ görsel sağlayıcısı", "ready": bool(IMAGE_URL and IMAGE_MODEL), "betaRequired": False, "commercialRequired": False, "detail": "Eksikse stok veya kullanıcı yüklemesi kullanılır."},
         {"id": "stock", "category": "İçerik", "label": "Pexels stok sağlayıcısı", "ready": bool(PEXELS_API_KEY), "betaRequired": False, "commercialRequired": False, "detail": "Eksikse Wikimedia Commons yedeği kullanılabilir."},
-        {"id": "voice", "category": "Motor", "label": "Sunucu seslendirmesi", "ready": bool(shutil.which("say") or shutil.which("espeak-ng")), "betaRequired": True, "commercialRequired": True, "detail": "Yerel TTS ile ses dosyası üretir."},
+        {"id": "voice", "category": "Motor", "label": "Sunucu seslendirmesi", "ready": voice_engine_ready(), "betaRequired": True, "commercialRequired": True, "detail": "Yerel TTS ile ses dosyası üretir."},
         {"id": "auth", "category": "Güvenlik", "label": "Zorunlu kullanıcı girişi", "ready": bool(AUTH_REQUIRED and ADMIN_EMAIL and ADMIN_PASSWORD), "betaRequired": False, "commercialRequired": True, "detail": "Ticari yayında hesapları ve projeleri ayırır."},
         {"id": "https", "category": "Yayın", "label": "HTTPS alan adı", "ready": PUBLIC_BASE_URL.startswith("https://"), "betaRequired": False, "commercialRequired": True, "detail": "Sunucu alınana kadar kapalı kalabilir."},
         {"id": "cookies", "category": "Güvenlik", "label": "Güvenli oturum çerezi", "ready": bool(SECURE_COOKIES), "betaRequired": False, "commercialRequired": True, "detail": "HTTPS yayında açılmalıdır."},
@@ -1337,13 +1338,25 @@ def fetch_wikipedia_summary(subject: str) -> dict:
     if not results:
         raise ValueError("Wikipedia üzerinde ilgili kişi bulunamadı")
     title = results[0]["title"]
+    extract_params = urlencode({
+        "action": "query", "prop": "extracts", "titles": title,
+        "exintro": 1, "explaintext": 1, "format": "json", "formatversion": 2,
+    })
+    intro_request = Request(
+        f"https://tr.wikipedia.org/w/api.php?{extract_params}",
+        headers={"User-Agent": "Videoluk/0.1 (video research)"},
+    )
+    with urlopen(intro_request, timeout=20) as response:
+        intro_data = json.loads(response.read().decode("utf-8"))
+    intro_extract = " ".join(str(((intro_data.get("query", {}).get("pages") or [{}])[0]).get("extract") or "").split())
     summary_request = Request(
         f"https://tr.wikipedia.org/api/rest_v1/page/summary/{quote(title.replace(' ', '_'), safe='')}",
         headers={"User-Agent": "Videoluk/0.1 (video research)"},
     )
     with urlopen(summary_request, timeout=20) as response:
         summary = json.loads(response.read().decode("utf-8"))
-    extract = " ".join(str(summary.get("extract") or "").split())
+    summary_extract = " ".join(str(summary.get("extract") or "").split())
+    extract = intro_extract if len(intro_extract) > len(summary_extract) else summary_extract
     if len(extract) < 80:
         raise ValueError("Wikipedia özeti yeterli değil")
     return {
@@ -1357,23 +1370,34 @@ def fetch_wikipedia_summary(subject: str) -> dict:
 def generate_biography_script(payload: dict, subject: str) -> dict:
     idea, duration, video_type, tone = validate_script_request(payload)
     article = fetch_wikipedia_summary(subject)
-    sentences = [part.strip() for part in article["extract"].replace(";", ".").split(".") if len(part.strip()) > 25]
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|;\s+", article["extract"]) if len(part.strip()) > 25]
     scene_count = 3 if duration <= 30 else 4 if duration <= 60 else 5
     if len(sentences) < scene_count:
-        scene_count = max(2, len(sentences))
+        words = article["extract"].split()
+        chunk_size = max(1, math.ceil(len(words) / scene_count))
+        sentences = [" ".join(words[index:index + chunk_size]) for index in range(0, len(words), chunk_size)]
     groups = [[] for _ in range(scene_count)]
     for index, sentence in enumerate(sentences[: scene_count * 3]):
         groups[min(scene_count - 1, index * scene_count // min(len(sentences), scene_count * 3))].append(sentence)
     scenes = []
     labels = ["Kimdir?", "İlk yılları", "Siyasi yaşamı", "Dönüm noktaları", "Mirası"]
+    media_suffixes = ["portre", "gençliği", "TBMM", "miting", "anma"]
     for index, group in enumerate(groups):
         subtitle = ". ".join(group).strip() + "."
-        scenes.append({
+        scene = {
             "title": f"{article['title']} · {labels[min(index, len(labels) - 1)]}",
             "subtitle": subtitle,
             "purpose": "Kanca" if index == 0 else "Kapanış" if index == len(groups) - 1 else "Ana fikir",
-            "mediaQuery": article["title"],
-        })
+            "mediaQuery": f"{article['title']} {media_suffixes[min(index, len(media_suffixes) - 1)]}",
+        }
+        if index == 0 and article.get("image"):
+            image_url = article["image"]
+            scene["suggestedMedia"] = {
+                "id": hashlib.sha256(image_url.encode()).hexdigest()[:24],
+                "mediaType": "image", "thumbnail": image_url, "imageUrl": image_url,
+                "creator": "Wikipedia", "provider": "wikimedia", "sourceUrl": article.get("url"),
+            }
+        scenes.append(scene)
     script = "\n\n".join(scene["subtitle"] for scene in scenes)
     result = {
         "idea": idea, "type": video_type, "tone": tone, "duration": duration,
@@ -1574,6 +1598,23 @@ def search_commons_images(query: str, per_page: int = 8) -> dict:
         raise ValueError(f"Wikimedia Commons servisine ulaşılamadı: {exc}") from exc
 
 
+def voice_engine_ready() -> bool:
+    return bool(shutil.which("espeak-ng") or EDGE_TTS.is_file() or shutil.which("edge-tts") or shutil.which("say"))
+
+
+def valid_audio_file(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size < 1024:
+        return False
+    try:
+        probe = subprocess.run(
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, timeout=20,
+        )
+        return probe.returncode == 0 and float((probe.stdout or "0").strip()) >= 0.25
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
 def generate_voice(text: str) -> dict:
     clean_text = " ".join(text.split()).strip()
     if len(clean_text) < 3:
@@ -1583,22 +1624,32 @@ def generate_voice(text: str) -> dict:
     voice_id = str(uuid.uuid4())
     target = VOICES / f"{voice_id}.wav"
     result = None
-    if shutil.which("say"):
+    edge_tts = str(EDGE_TTS) if EDGE_TTS.is_file() else shutil.which("edge-tts")
+    if edge_tts:
+        intermediate_mp3 = VOICES / f"{voice_id}.mp3"
+        result = subprocess.run(
+            [edge_tts, "--voice", "tr-TR-AhmetNeural", "--rate=-4%", "--text", clean_text, "--write-media", str(intermediate_mp3)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0 and intermediate_mp3.is_file():
+            result = subprocess.run([FFMPEG, "-y", "-i", str(intermediate_mp3), "-ar", "44100", "-ac", "2", str(target)], capture_output=True, text=True)
+        intermediate_mp3.unlink(missing_ok=True)
+    if (result is None or result.returncode != 0 or not valid_audio_file(target)) and shutil.which("say"):
         intermediate = VOICES / f"{voice_id}.aiff"
         for voice_arguments in (["-v", "Yelda"], []):
             intermediate.unlink(missing_ok=True)
             result = subprocess.run(["say", *voice_arguments, "-o", str(intermediate), clean_text], capture_output=True, text=True)
             if result.returncode == 0 and intermediate.is_file():
                 result = subprocess.run([FFMPEG, "-y", "-i", str(intermediate), "-ar", "44100", "-ac", "2", str(target)], capture_output=True, text=True)
-            if result.returncode == 0 and target.is_file() and target.stat().st_size >= 1024:
+            if result.returncode == 0 and valid_audio_file(target):
                 break
         intermediate.unlink(missing_ok=True)
-    if (result is None or result.returncode != 0 or not target.is_file() or target.stat().st_size < 1024) and shutil.which("espeak-ng"):
+    if (result is None or result.returncode != 0 or not valid_audio_file(target)) and shutil.which("espeak-ng"):
         target.unlink(missing_ok=True)
         result = subprocess.run(["espeak-ng", "-v", "tr", "-s", "155", "-w", str(target), clean_text], capture_output=True, text=True)
     if result is None:
         raise ValueError("Sunucuda seslendirme motoru bulunamadı")
-    if result.returncode != 0 or not target.is_file() or target.stat().st_size < 1024:
+    if result.returncode != 0 or not valid_audio_file(target):
         target.unlink(missing_ok=True)
         raise ValueError("Seslendirme üretilemedi")
     return {"id": voice_id, "audioUrl": f"/api/voices/{voice_id}", "provider": "system-tts"}
@@ -1852,6 +1903,7 @@ def render(job_id: str, project: dict) -> None:
             video_input = ["-f", "lavfi", "-i", f"color=c=#173e39:s={width}x{height}:r=30:d={duration}"]
         captions = payload.get("captions") if isinstance(payload.get("captions"), dict) else {}
         captions_enabled = captions.get("enabled", True) is not False
+        burn_captions = captions_enabled and ffmpeg_has_filter("subtitles")
         caption_style = str(captions.get("style") or "classic")
         caption_position = str(captions.get("position") or "bottom")
         alignment = {"top": 8, "middle": 5, "bottom": 2}.get(caption_position, 2)
@@ -1861,7 +1913,7 @@ def render(job_id: str, project: dict) -> None:
             "bold": "PrimaryColour=&H0017211D,BackColour=&H005BFFC9,FontSize=32,Bold=1,BorderStyle=3",
             "minimal": "PrimaryColour=&H00FFFFFF,BackColour=&H00000000,FontSize=26,BorderStyle=1,Outline=2",
         }.get(caption_style, "PrimaryColour=&H00FFFFFF,BackColour=&H9917211D,FontSize=28,BorderStyle=3")
-        if captions_enabled and ffmpeg_has_filter("subtitles"):
+        if burn_captions:
             video_filters += (
                 f",subtitles=filename='{escaped_srt}':"
                 f"force_style='Alignment={alignment},MarginV={margin},{style_values},"
@@ -1900,9 +1952,18 @@ def render(job_id: str, project: dict) -> None:
         ]
         if not music_path:
             command += ["-af", "apad"]
-        command += ["-c:a", "aac", "-b:a", "128k", "-t", str(duration), "-movflags", "+faststart", str(output_path)]
+        encoded_path = output_path if burn_captions or not captions_enabled else job_dir / "videoluk-base.mp4"
+        command += ["-c:a", "aac", "-b:a", "128k", "-t", str(duration), "-movflags", "+faststart", str(encoded_path)]
         update_job(job_id, progress=75 if sequence else 35)
         run_ffmpeg(command)
+        if captions_enabled and not burn_captions:
+            run_ffmpeg([
+                FFMPEG, "-y", "-i", str(encoded_path), "-i", str(subtitle_path),
+                "-map", "0", "-map", "1:0", "-c", "copy", "-c:s", "mov_text",
+                "-metadata:s:s:0", "language=tur", "-metadata:s:s:0", "title=Türkçe",
+                "-movflags", "+faststart", str(output_path),
+            ])
+            encoded_path.unlink(missing_ok=True)
         update_job(
             job_id,
             status="completed",
@@ -2460,7 +2521,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "imageEngine": "ai" if IMAGE_URL and IMAGE_MODEL else "stock-fallback",
                 "imageModel": IMAGE_MODEL or None,
                 "stockProvider": "pexels" if PEXELS_API_KEY else None,
-                "voiceEngine": "system-tts" if shutil.which("say") or shutil.which("espeak-ng") else None,
+                "voiceEngine": "system-tts" if voice_engine_ready() else None,
                 "authRequired": AUTH_REQUIRED,
                 "authReady": bool(not AUTH_REQUIRED or (ADMIN_EMAIL and ADMIN_PASSWORD)),
                 "queue": operations["queue"],
