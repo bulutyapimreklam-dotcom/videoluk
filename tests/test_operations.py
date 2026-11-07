@@ -51,6 +51,13 @@ class OperationsTests(unittest.TestCase):
         self.assertIn("Ücretli abonelik tahsilatı henüz açılmadı", pricing)
         self.assertGreaterEqual(faq.count("<details"), 10)
         self.assertIn("KVKK", faq)
+        for page in ("iletisim.html", "icerik-politikasi.html"):
+            content = (ROOT / "dist" / page).read_text(encoding="utf-8")
+            self.assertIn("Videoluk", content)
+            self.assertIn(f'href="{page}"', index)
+        self.assertIn("support.js", (ROOT / "dist" / "iletisim.html").read_text(encoding="utf-8"))
+        self.assertIn("/api/support", (ROOT / "dist" / "support.js").read_text(encoding="utf-8"))
+        self.assertIn("acceptTerms", index)
 
     def test_brand_assets_are_connected_to_application(self):
         index = (ROOT / "dist" / "index.html").read_text(encoding="utf-8")

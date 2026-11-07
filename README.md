@@ -108,6 +108,15 @@ Kredi satın alma iyzico Checkout Form ile hazırlanmıştır. Kart verisi Video
 
 Ticari yayından önce KVKK metnindeki ticari unvan, adres, başvuru e-postası ve saklama takvimi gerçek bilgilerle doldurulmalı; fiyatların KDV/fatura ve mesafeli satış koşulları hukuk ve mali müşavir incelemesinden geçirilmelidir.
 
+Kendi kendine hesap açma `VIDEOLUK_REGISTRATION_ENABLED=1` ile yönetilir. Kayıt sırasında kullanım koşulları ve KVKK metni ayrı ayrı onaylanır; belge sürümü `VIDEOLUK_LEGAL_VERSION` ile birlikte zaman ve IP kaydı olarak saklanır. Yeni hesap ücretsiz Başlangıç planıyla açılır. Destek, ödeme, KVKK, telif, güvenlik ve geri bildirim başvuruları `/api/support` üzerinden kayıt altına alınır; herkese açık kayıt ve destek uç noktaları IP bazlı hız sınırına tabidir. Bu kayıtlar hesap dışa aktarımına dahildir.
+
+İlgili kullanıcı yüzeyleri:
+
+- `iletisim.html`: destek ve bildirim merkezi
+- `icerik-politikasi.html`: kabul edilebilir kullanım, telif ve yapay zekâ çıktı politikası
+- `POST /api/auth/register`: koşul ve KVKK onaylı hesap kaydı
+- `POST /api/support`: destek/telif/KVKK/güvenlik talebi
+
 Sağlık kontrolü:
 
 ```bash

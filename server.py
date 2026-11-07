@@ -96,6 +96,8 @@ SUBSCRIPTION_PLANS = {
     "studio": {"name": "Studio", "monthlyPrice": 1490, "credits": 1800, "projects": 250, "storageGb": 50, "monthlyRenders": 250},
 }
 SUBSCRIPTION_BILLING_ENABLED = os.getenv("VIDEOLUK_SUBSCRIPTION_BILLING_ENABLED", "0").lower() in {"1", "true", "yes"}
+REGISTRATION_ENABLED = os.getenv("VIDEOLUK_REGISTRATION_ENABLED", "1").lower() in {"1", "true", "yes"}
+LEGAL_VERSION = os.getenv("VIDEOLUK_LEGAL_VERSION", "2026-11-08")
 RENDER_WORKERS = max(1, min(4, int(os.getenv("VIDEOLUK_RENDER_WORKERS", "1"))))
 MAX_QUEUED_RENDERS = max(1, int(os.getenv("VIDEOLUK_MAX_QUEUED_RENDERS", "8")))
 ALLOWED_ORIGIN = os.getenv("VIDEOLUK_ALLOWED_ORIGIN", "").rstrip("/")
@@ -107,6 +109,8 @@ ALERT_LOCK = threading.Lock()
 ALERT_LAST_SENT: dict[str, float] = {}
 PASSWORD_RESET_LOCK = threading.Lock()
 PASSWORD_RESET_LAST_SENT: dict[str, float] = {}
+PUBLIC_ACTION_LOCK = threading.Lock()
+PUBLIC_ACTIONS: dict[str, list[float]] = {}
 PASSWORD_RESET_COOLDOWN_SECONDS = max(60, int(os.getenv("VIDEOLUK_PASSWORD_RESET_COOLDOWN_SECONDS", "300")))
 RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=RENDER_WORKERS, thread_name_prefix="videoluk-render")
 ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videoluk-analysis")
@@ -133,6 +137,16 @@ def ffmpeg_has_filter(filter_name: str) -> bool:
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def enforce_public_rate_limit(action: str, ip_address: str, limit: int = 5, window_seconds: int = 3600) -> None:
+    key, current = f"{action}:{ip_address}", time.time()
+    with PUBLIC_ACTION_LOCK:
+        recent = [stamp for stamp in PUBLIC_ACTIONS.get(key, []) if current - stamp < window_seconds]
+        if len(recent) >= limit:
+            raise ValueError("Çok fazla istek gönderildi; lütfen daha sonra tekrar deneyin")
+        recent.append(current)
+        PUBLIC_ACTIONS[key] = recent
 
 
 def db() -> sqlite3.Connection:
@@ -330,9 +344,32 @@ def initialize() -> None:
                 resolved_at TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
+            CREATE TABLE IF NOT EXISTS legal_acceptances (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                document TEXT NOT NULL,
+                version TEXT NOT NULL,
+                ip_address TEXT NOT NULL,
+                accepted_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS support_requests (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                category TEXT NOT NULL,
+                message TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at ON admin_audit_events(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_deletion_requests_user ON account_deletion_requests(user_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_legal_acceptances_user ON legal_acceptances(user_id, accepted_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_support_requests_created ON support_requests(created_at DESC);
             """
         )
         project_columns = {row["name"] for row in connection.execute("PRAGMA table_info(projects)").fetchall()}
@@ -775,6 +812,12 @@ def account_data_export(user_id: str) -> dict:
             "SELECT plan_id, status, provider, current_period_start, current_period_end, cancel_at_period_end, created_at, updated_at "
             "FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,)
         ).fetchone()
+        acceptance_rows = connection.execute(
+            "SELECT document, version, accepted_at FROM legal_acceptances WHERE user_id = ? ORDER BY accepted_at", (user_id,)
+        ).fetchall()
+        support_rows = connection.execute(
+            "SELECT id, category, message, status, created_at, updated_at FROM support_requests WHERE user_id = ? ORDER BY created_at", (user_id,)
+        ).fetchall()
 
     projects = []
     for row in project_rows:
@@ -789,6 +832,7 @@ def account_data_export(user_id: str) -> dict:
         "media": [dict(row) for row in asset_rows], "renders": [dict(row) for row in render_rows],
         "usageEvents": usage, "creditTransactions": credits, "payments": [dict(row) for row in payment_rows],
         "subscription": dict(subscription_row) if subscription_row else subscription_for_user(user_id),
+        "legalAcceptances": [dict(row) for row in acceptance_rows], "supportRequests": [dict(row) for row in support_rows],
     }
 
 
@@ -822,6 +866,60 @@ def create_managed_user(payload: dict) -> dict:
     if status == "invited":
         result["activation"] = create_auth_token(user_id, "invite")
     return result
+
+
+def register_user(payload: dict, ip_address: str) -> dict:
+    if not REGISTRATION_ENABLED:
+        raise ValueError("Yeni hesap kaydı şu anda kapalı")
+    if payload.get("acceptTerms") is not True or payload.get("acceptPrivacy") is not True:
+        raise ValueError("Kullanım koşulları ve KVKK metni kabul edilmelidir")
+    email = str(payload.get("email") or "").strip().lower()[:254]
+    name = " ".join(str(payload.get("name") or "").split())[:120]
+    password = str(payload.get("password") or "")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError("Geçerli bir e-posta adresi gerekli")
+    if len(name) < 2:
+        raise ValueError("Ad soyad en az 2 karakter olmalı")
+    password_hash = hash_password(password)
+    timestamp, user_id = now(), str(uuid.uuid4())
+    with DB_LOCK, db() as connection:
+        if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
+            raise ValueError("Bu e-posta adresi zaten kayıtlı")
+        connection.execute(
+            "INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at, status) VALUES (?, ?, ?, ?, 'member', ?, ?, 'active')",
+            (user_id, email, name, password_hash, timestamp, timestamp),
+        )
+        connection.execute(
+            "INSERT INTO credit_transactions VALUES (?, ?, ?, 'starter', 'Başlangıç kredisi', '{}', ?)",
+            (str(uuid.uuid4()), user_id, STARTER_CREDITS, timestamp),
+        )
+        for document in ("terms", "privacy"):
+            connection.execute(
+                "INSERT INTO legal_acceptances VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), user_id, document, LEGAL_VERSION, ip_address[:64], timestamp),
+            )
+    select_free_subscription(user_id)
+    return {"id": user_id, "email": email, "name": name, "role": "member"}
+
+
+def create_support_request(payload: dict, user: dict | None = None) -> dict:
+    name = " ".join(str(payload.get("name") or (user or {}).get("name") or "").split())[:120]
+    email = str(payload.get("email") or (user or {}).get("email") or "").strip().lower()[:254]
+    category = str(payload.get("category") or "support").strip().lower()[:40]
+    message = " ".join(str(payload.get("message") or "").split())[:4000]
+    if len(name) < 2 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError("Ad ve geçerli e-posta adresi gerekli")
+    if category not in {"support", "billing", "privacy", "copyright", "security", "feedback"}:
+        raise ValueError("Geçersiz destek kategorisi")
+    if len(message) < 10:
+        raise ValueError("Mesaj en az 10 karakter olmalı")
+    request_id, timestamp = str(uuid.uuid4()), now()
+    with DB_LOCK, db() as connection:
+        connection.execute(
+            "INSERT INTO support_requests VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+            (request_id, (user or {}).get("id"), name, email, category, message, timestamp, timestamp),
+        )
+    return {"id": request_id, "status": "open", "message": "Talebiniz kaydedildi"}
 
 
 def update_managed_user(user_id: str, payload: dict, actor_id: str) -> dict:
@@ -1087,6 +1185,9 @@ def admin_overview() -> dict:
             "users.id AS user_id, users.name, users.email FROM account_deletion_requests AS requests "
             "JOIN users ON users.id = requests.user_id ORDER BY requests.created_at DESC LIMIT 100"
         ).fetchall()
+        support_requests = connection.execute(
+            "SELECT id, name, email, category, message, status, created_at FROM support_requests ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
     audit_items = []
     for row in audit:
         item = dict(row)
@@ -1095,7 +1196,7 @@ def admin_overview() -> dict:
         except json.JSONDecodeError:
             item["details"] = {}
         audit_items.append(item)
-    return {"metrics": metrics, "operations": operational_status(), "readiness": production_readiness(), "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders], "events": [dict(row) for row in events], "audit": audit_items, "deletionRequests": [dict(row) for row in deletion_requests]}
+    return {"metrics": metrics, "operations": operational_status(), "readiness": production_readiness(), "users": [dict(row) for row in users], "payments": [dict(row) for row in payments], "renders": [dict(row) for row in renders], "events": [dict(row) for row in events], "audit": audit_items, "deletionRequests": [dict(row) for row in deletion_requests], "supportRequests": [dict(row) for row in support_requests]}
 
 
 def estimate_project_cost(payload: dict) -> dict:
@@ -2299,6 +2400,18 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                     "expiresAt": expires_at,
                 }, {"Set-Cookie": cookie})
                 return
+            if route == "/api/auth/register":
+                enforce_public_rate_limit("register", self.client_address[0], 5)
+                account = register_user(self.read_json(), self.client_address[0])
+                token, expires_at = create_session(account["id"])
+                secure = "; Secure" if SECURE_COOKIES else ""
+                cookie = f"videoluk_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_DAYS * 86400}{secure}"
+                self.send_json(HTTPStatus.CREATED, {"authenticated": True, "user": account, "expiresAt": expires_at}, {"Set-Cookie": cookie})
+                return
+            if route == "/api/support":
+                enforce_public_rate_limit("support", self.client_address[0], 10)
+                self.send_json(HTTPStatus.CREATED, create_support_request(self.read_json(), self.current_user()))
+                return
             if route == "/api/auth/logout":
                 cookie = SimpleCookie(self.headers.get("Cookie", ""))
                 morsel = cookie.get("videoluk_session")
@@ -2606,6 +2719,8 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "ready": bool(not AUTH_REQUIRED or (ADMIN_EMAIL and ADMIN_PASSWORD)),
                 "authenticated": bool(user),
                 "user": user,
+                "registrationEnabled": REGISTRATION_ENABLED,
+                "legalVersion": LEGAL_VERSION,
             })
             return
         if route == "/api/auth/token":

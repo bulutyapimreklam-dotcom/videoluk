@@ -7,6 +7,26 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_self_registration_records_legal_acceptance_and_support(self):
+        originals = {"DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES, "MEDIA_CACHE": server.MEDIA_CACHE, "GENERATED_IMAGES": server.GENERATED_IMAGES, "TRAINING_VIDEOS": server.TRAINING_VIDEOS, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH, "REGISTRATION_ENABLED": server.REGISTRATION_ENABLED}
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root; server.OUTPUTS = root / "renders"; server.VOICES = root / "voices"; server.MEDIA_CACHE = root / "media-cache"
+                server.GENERATED_IMAGES = root / "generated-images"; server.TRAINING_VIDEOS = root / "training-videos"; server.UPLOADS = root / "uploads"; server.DB_PATH = root / "videoluk.db"; server.REGISTRATION_ENABLED = True
+                server.initialize()
+                account = server.register_user({"name": "Beta Üyesi", "email": "beta@example.com", "password": "guvenli-parola-123", "acceptTerms": True, "acceptPrivacy": True}, "127.0.0.1")
+                request = server.create_support_request({"category": "support", "message": "Render sonucunda destek istiyorum."}, account)
+                self.assertEqual("open", request["status"])
+                with server.db() as connection:
+                    self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM legal_acceptances WHERE user_id = ?", (account["id"],)).fetchone()[0])
+                    self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM support_requests WHERE user_id = ?", (account["id"],)).fetchone()[0])
+                exported = server.account_data_export(account["id"])
+                self.assertEqual(2, len(exported["legalAcceptances"]))
+                self.assertEqual(1, len(exported["supportRequests"]))
+        finally:
+            for name, value in originals.items(): setattr(server, name, value)
+
     def test_free_subscription_is_persisted_and_exported(self):
         originals = {"DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES, "MEDIA_CACHE": server.MEDIA_CACHE, "GENERATED_IMAGES": server.GENERATED_IMAGES, "TRAINING_VIDEOS": server.TRAINING_VIDEOS, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH}
         try:
