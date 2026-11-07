@@ -24,10 +24,17 @@ Gereksinimler: Python 3.11+ ve FFmpeg. İlk çalıştırmada yerel Türkçe ses 
 ```bash
 chmod +x scripts/setup_local.sh
 ./scripts/setup_local.sh
-.venv/bin/python server.py
+./scripts/videoluk_local.sh start
 ```
 
-Ardından `http://127.0.0.1:8787` adresini açın.
+Ardından `http://127.0.0.1:4173` adresini açın. Yerel motor arka planda çalışır; terminal kapandığında render sunucusu kapanmaz.
+
+```bash
+./scripts/videoluk_local.sh status   # Sağlık ve motor durumunu gösterir
+./scripts/videoluk_local.sh logs     # Son sunucu kayıtlarını gösterir
+./scripts/videoluk_local.sh restart  # Güncellemeden sonra yeniden başlatır
+./scripts/videoluk_local.sh stop     # Yerel motoru güvenli biçimde durdurur
+```
 
 ## Docker ile çalıştırma
 
