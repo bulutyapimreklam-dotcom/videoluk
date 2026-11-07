@@ -90,6 +90,12 @@ CREDIT_PACKAGES = {
     "creator": {"name": "Üretici", "credits": 500, "price": "799.00"},
     "studio": {"name": "Stüdyo", "credits": 1200, "price": "1499.00"},
 }
+SUBSCRIPTION_PLANS = {
+    "free": {"name": "Başlangıç", "monthlyPrice": 0, "credits": 30, "projects": 3, "storageGb": 1, "monthlyRenders": 5},
+    "creator": {"name": "Creator", "monthlyPrice": 499, "credits": 500, "projects": 50, "storageGb": 10, "monthlyRenders": 60},
+    "studio": {"name": "Studio", "monthlyPrice": 1490, "credits": 1800, "projects": 250, "storageGb": 50, "monthlyRenders": 250},
+}
+SUBSCRIPTION_BILLING_ENABLED = os.getenv("VIDEOLUK_SUBSCRIPTION_BILLING_ENABLED", "0").lower() in {"1", "true", "yes"}
 RENDER_WORKERS = max(1, min(4, int(os.getenv("VIDEOLUK_RENDER_WORKERS", "1"))))
 MAX_QUEUED_RENDERS = max(1, int(os.getenv("VIDEOLUK_MAX_QUEUED_RENDERS", "8")))
 ALLOWED_ORIGIN = os.getenv("VIDEOLUK_ALLOWED_ORIGIN", "").rstrip("/")
@@ -277,6 +283,20 @@ def initialize() -> None:
                 payment_id TEXT,
                 status TEXT NOT NULL,
                 error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                provider_reference TEXT,
+                current_period_start TEXT NOT NULL,
+                current_period_end TEXT,
+                cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
@@ -675,6 +695,40 @@ def user_usage(user_id: str) -> dict:
     }
 
 
+def subscription_for_user(user_id: str) -> dict:
+    with db() as connection:
+        row = connection.execute(
+            "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,)
+        ).fetchone()
+    if not row:
+        return {"planId": "free", "status": "active", "provider": "videoluk-beta", "cancelAtPeriodEnd": False}
+    return {
+        "id": row["id"], "planId": row["plan_id"], "status": row["status"], "provider": row["provider"],
+        "currentPeriodStart": row["current_period_start"], "currentPeriodEnd": row["current_period_end"],
+        "cancelAtPeriodEnd": bool(row["cancel_at_period_end"]),
+    }
+
+
+def select_free_subscription(user_id: str) -> dict:
+    timestamp = now()
+    with DB_LOCK, db() as connection:
+        existing = connection.execute(
+            "SELECT id FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,)
+        ).fetchone()
+        if existing:
+            connection.execute(
+                "UPDATE subscriptions SET plan_id = 'free', status = 'active', provider = 'videoluk-beta', "
+                "provider_reference = NULL, current_period_start = ?, current_period_end = NULL, cancel_at_period_end = 0, updated_at = ? WHERE id = ?",
+                (timestamp, timestamp, existing["id"]),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO subscriptions VALUES (?, ?, 'free', 'active', 'videoluk-beta', NULL, ?, NULL, 0, ?, ?)",
+                (str(uuid.uuid4()), user_id, timestamp, timestamp, timestamp),
+            )
+    return subscription_for_user(user_id)
+
+
 def account_data_export(user_id: str) -> dict:
     """Return a portable account archive without credentials or server file paths."""
     def decoded(value):
@@ -717,6 +771,10 @@ def account_data_export(user_id: str) -> dict:
             "SELECT id, provider, package_id, credits, amount, currency, status, created_at, updated_at "
             "FROM payment_orders WHERE user_id = ? ORDER BY created_at", (user_id,)
         ).fetchall()
+        subscription_row = connection.execute(
+            "SELECT plan_id, status, provider, current_period_start, current_period_end, cancel_at_period_end, created_at, updated_at "
+            "FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,)
+        ).fetchone()
 
     projects = []
     for row in project_rows:
@@ -730,6 +788,7 @@ def account_data_export(user_id: str) -> dict:
         "limits": dict(limits) if limits else None, "projects": projects,
         "media": [dict(row) for row in asset_rows], "renders": [dict(row) for row in render_rows],
         "usageEvents": usage, "creditTransactions": credits, "payments": [dict(row) for row in payment_rows],
+        "subscription": dict(subscription_row) if subscription_row else subscription_for_user(user_id),
     }
 
 
@@ -968,6 +1027,7 @@ def production_readiness() -> dict:
         {"id": "cookies", "category": "Güvenlik", "label": "Güvenli oturum çerezi", "ready": bool(SECURE_COOKIES), "betaRequired": False, "commercialRequired": True, "detail": "HTTPS yayında açılmalıdır."},
         {"id": "email", "category": "İletişim", "label": "SMTP e-posta teslimi", "ready": email_delivery_ready(), "betaRequired": False, "commercialRequired": True, "detail": "Davet ve parola yenileme bağlantılarını gönderir."},
         {"id": "payment", "category": "Ödeme", "label": "Canlı iyzico bağlantısı", "ready": payment_configured and "sandbox" not in IYZICO_BASE_URL.casefold(), "betaRequired": False, "commercialRequired": True, "detail": "Sandbox test için yeterlidir; satış için canlı anahtar gerekir.", "configured": payment_configured},
+        {"id": "subscription", "category": "Ödeme", "label": "Tekrarlayan abonelik tahsilatı", "ready": bool(SUBSCRIPTION_BILLING_ENABLED and payment_configured), "betaRequired": False, "commercialRequired": True, "detail": "Sağlayıcı abonelik sözleşmesi, ürün kimlikleri ve webhook doğrulaması tamamlanınca açılmalıdır."},
         {"id": "legal", "category": "Yasal", "label": "Şirket ve KVKK bilgileri", "ready": legal_ready, "betaRequired": False, "commercialRequired": True, "detail": "Ticari unvan, adres ve başvuru e-postası doldurulmalıdır."},
         {"id": "alerts", "category": "Operasyon", "label": "Hata bildirim kanalı", "ready": bool(ALERT_WEBHOOK_URL), "betaRequired": False, "commercialRequired": False, "detail": "Canlı kullanımda önerilir."},
     ]
@@ -2279,6 +2339,16 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 request_id = route.strip("/").split("/")[3]
                 self.send_json(HTTPStatus.OK, update_deletion_request(request_id, "cancelled", user))
                 return
+            if route == "/api/subscription":
+                plan_id = str(body.get("planId") or "")
+                if plan_id not in SUBSCRIPTION_PLANS:
+                    raise ValueError("Abonelik planı bulunamadı")
+                if plan_id != "free":
+                    message = "Ücretli abonelik tahsilatı henüz etkin değil" if not SUBSCRIPTION_BILLING_ENABLED else "Abonelik ödeme sağlayıcısı bağlantısı tamamlanmalı"
+                    self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": message, "checkoutReady": False})
+                    return
+                self.send_json(HTTPStatus.OK, select_free_subscription(user["id"]))
+                return
             if route == "/api/admin/users":
                 owner = self.require_owner()
                 if not owner:
@@ -2573,6 +2643,20 @@ class VideolukHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/usage":
             self.send_json(HTTPStatus.OK, user_usage(self.current_user()["id"]))
+            return
+        if route == "/api/subscription":
+            current = subscription_for_user(self.current_user()["id"])
+            self.send_json(HTTPStatus.OK, {
+                "subscription": current,
+                "plan": {"id": current["planId"], **SUBSCRIPTION_PLANS[current["planId"]]},
+                "billingEnabled": SUBSCRIPTION_BILLING_ENABLED,
+            })
+            return
+        if route == "/api/subscription-plans":
+            self.send_json(HTTPStatus.OK, {
+                "billingEnabled": SUBSCRIPTION_BILLING_ENABLED, "currency": "TRY",
+                "plans": [{"id": plan_id, **plan} for plan_id, plan in SUBSCRIPTION_PLANS.items()],
+            })
             return
         if route == "/api/account/deletion-request":
             self.send_json(HTTPStatus.OK, {"request": deletion_request_for_user(self.current_user()["id"])})

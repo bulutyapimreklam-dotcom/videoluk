@@ -100,6 +100,14 @@ Her hesap başlangıçta varsayılan 120 kredi alır. Render öncesinde video s�
 
 Kredi satın alma iyzico Checkout Form ile hazırlanmıştır. Kart verisi Videoluk'a uğramaz; kullanıcı iyzico ödeme sayfasına yönlendirilir. Callback tokenı sunucudan iyzico'ya tekrar sorgulanır, ödeme tutarı/sepet/para birimi ve fraud onayı eşleşmeden kredi eklenmez. Aynı sipariş ikinci kez kredi yükleyemez. Sandbox için `VIDEOLUK_IYZICO_API_KEY`, `VIDEOLUK_IYZICO_SECRET_KEY`, `VIDEOLUK_IYZICO_BASE_URL` ve HTTPS kullanan `VIDEOLUK_PUBLIC_BASE_URL` ayarlanmalıdır.
 
+## SaaS ve abonelik durumu
+
+`fiyatlandirma.html`, `sss.html` ve `gizlilik.html` ürünün fiyat, destek ve KVKK yüzeyidir. Hesap ekranı mevcut planı `/api/subscription` üzerinden gösterir; plan kataloğu `/api/subscription-plans` ile sunulur. Ücretsiz beta planı kalıcı olarak seçilebilir.
+
+Ücretli tekrarlayan tahsilat bilinçli olarak kapalıdır. Ödeme kuruluşunun abonelik sözleşmesi, ürün kimlikleri, yenileme/iptal webhook doğrulaması ve canlı anahtarları tamamlanmadan `VIDEOLUK_SUBSCRIPTION_BILLING_ENABLED=1` yapılmamalıdır. Tek seferlik kredi satın alma altyapısı abonelik tahsilatı yerine geçmez.
+
+Ticari yayından önce KVKK metnindeki ticari unvan, adres, başvuru e-postası ve saklama takvimi gerçek bilgilerle doldurulmalı; fiyatların KDV/fatura ve mesafeli satış koşulları hukuk ve mali müşavir incelemesinden geçirilmelidir.
+
 Sağlık kontrolü:
 
 ```bash

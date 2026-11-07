@@ -7,6 +7,8 @@
   --studio-muted: #6d7b75;
   --studio-card: rgba(255,255,255,.9);
 }
+.top-link{color:var(--muted);font:700 11px Manrope;text-decoration:none;padding:8px 4px}.top-link:hover,.top-link:focus{color:var(--ink)}
+@media(max-width:900px){.top-link{display:none}}
 
 body {
   background:

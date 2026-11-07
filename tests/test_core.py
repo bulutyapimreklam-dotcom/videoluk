@@ -7,6 +7,24 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_free_subscription_is_persisted_and_exported(self):
+        originals = {"DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES, "MEDIA_CACHE": server.MEDIA_CACHE, "GENERATED_IMAGES": server.GENERATED_IMAGES, "TRAINING_VIDEOS": server.TRAINING_VIDEOS, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH}
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                server.DATA = root; server.OUTPUTS = root / "renders"; server.VOICES = root / "voices"
+                server.MEDIA_CACHE = root / "media-cache"; server.GENERATED_IMAGES = root / "generated-images"
+                server.TRAINING_VIDEOS = root / "training-videos"; server.UPLOADS = root / "uploads"; server.DB_PATH = root / "videoluk.db"
+                server.initialize()
+                selected = server.select_free_subscription(server.LOCAL_USER_ID)
+                self.assertEqual("free", selected["planId"])
+                self.assertEqual("active", selected["status"])
+                exported = server.account_data_export(server.LOCAL_USER_ID)
+                self.assertEqual("free", exported["subscription"]["plan_id"])
+        finally:
+            for name, value in originals.items():
+                setattr(server, name, value)
+
     def test_account_deletion_request_requires_password_and_tracks_review(self):
         originals = {
             "DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES,

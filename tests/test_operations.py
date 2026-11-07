@@ -40,6 +40,18 @@ class OperationsTests(unittest.TestCase):
         self.assertIn("videoluk_session", cookies)
         self.assertIn("videoluk-draft", cookies)
 
+    def test_saas_pages_and_subscription_are_visible(self):
+        index = (ROOT / "dist" / "index.html").read_text(encoding="utf-8")
+        pricing = (ROOT / "dist" / "fiyatlandirma.html").read_text(encoding="utf-8")
+        faq = (ROOT / "dist" / "sss.html").read_text(encoding="utf-8")
+        for page in ("fiyatlandirma.html", "sss.html", "gizlilik.html"):
+            self.assertIn(f'href="{page}"', index)
+        for plan in ("Başlangıç", "Creator", "Studio"):
+            self.assertIn(plan, pricing)
+        self.assertIn("Ücretli abonelik tahsilatı henüz açılmadı", pricing)
+        self.assertGreaterEqual(faq.count("<details"), 10)
+        self.assertIn("KVKK", faq)
+
     def test_brand_assets_are_connected_to_application(self):
         index = (ROOT / "dist" / "index.html").read_text(encoding="utf-8")
         mark = (ROOT / "dist" / "videoluk-mark.svg").read_text(encoding="utf-8")
