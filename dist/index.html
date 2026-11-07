@@ -14,21 +14,22 @@
   <link rel="stylesheet" href="features.css?v=27" />
   <link rel="stylesheet" href="responsive.css?v=4" />
   <link rel="stylesheet" href="brand-system.css?v=1" />
+  <link rel="stylesheet" href="professional.css?v=1" />
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#"><span class="brandmark">V</span><span>Videoluk</span></a>
+    <a class="brand" href="#"><span class="brandmark">V</span><span class="brand-copy"><b>Videoluk</b><small>AI VIDEO STUDIO</small></span></a>
     <nav class="steps" aria-label="Proje adımları">
       <button class="step active" data-step="1"><b>1</b><span>Format</span></button><i></i>
       <button class="step" data-step="2"><b>2</b><span>İçerik</span></button><i></i>
       <button class="step" data-step="3"><b>3</b><span>Stüdyo</span></button>
     </nav>
-    <div class="top-actions"><button class="projects-btn" id="openProjects">Projeler</button><button class="avatar" id="userMenu" title="Hesap">V</button></div>
+    <div class="top-actions"><span class="service-pill" id="servicePill"><i></i> Motor bağlı</span><button class="projects-btn" id="openProjects">Projeler</button><button class="avatar" id="userMenu" title="Hesap">V</button></div>
   </header>
 
   <main>
     <section class="panel active" id="step-1">
-      <div class="intro"><span class="eyebrow">YENİ PROJE</span><h1>Ne anlatmak istiyorsun?</h1><p>Formatını seç, hikâyeni yaz. Kurguyu birlikte tamamlayalım.</p></div>
+      <div class="intro"><span class="eyebrow">YENİ VİDEO</span><h1>Fikrini yayına hazır<br>bir videoya dönüştür.</h1><p>Formatı seç. Konunu yaz. Videoluk metni, sahneleri, sesi ve kurguyu tek akışta hazırlasın.</p></div>
       <div class="workspace setup-grid">
         <div>
           <div class="section-title"><h2>Video türü</h2><span>01</span></div>
@@ -60,7 +61,8 @@
           <label>Kurgu DNA'sı</label>
           <div class="dna-picker"><select id="editingProfile"><option value="default">Benim Kurgu DNA'm</option></select><button id="openDna" type="button">Düzenle</button></div>
           <small class="dna-summary" id="dnaSummary">Kurgu prensiplerin senaryo ve sahne kararlarına uygulanır.</small>
-          <button class="primary next" data-next="2">İçeriği oluştur <span>→</span></button>
+          <div class="production-summary"><i>✦</i><span><b>Sonraki adım</b><small>Fikrini yazıp metni düzenleyeceksin.</small></span></div>
+          <button class="primary next" data-next="2">İçeriğe devam et <span>→</span></button>
         </aside>
       </div>
     </section>
