@@ -46,7 +46,7 @@ Oluşturulan proje kayıtları, MP4 dosyaları ve SRT altyazıları `videoluk-da
 
 ## Üretim sunucusuna kurulum
 
-Önerilen başlangıç hedefi Hetzner Cloud Nuremberg bölgesinde Ubuntu 24.04 çalıştıran CX33'tür. Dört vCPU, 8 GB RAM ve 80 GB NVMe ilk kapalı beta için yeterlidir; GPU sürekli açık tutulmaz. Ayrıntılı seçim ve güvenlik adımları [deploy/HETZNER.md](deploy/HETZNER.md) dosyasındadır.
+En düşük maliyetli başlangıç hedefi Hetzner Cloud Nuremberg bölgesinde Ubuntu 24.04 çalıştıran CX23'tür. İki paylaşımlı vCPU, 4 GB RAM, 40 GB NVMe ve tek render işçisi küçük kapalı beta için yeterlidir; GPU sürekli açık tutulmaz. Render süresi veya kuyruk eşiği aşılırsa CX33'e büyütülür. Ayrıntılı seçim, güncel maliyet notları ve güvenlik adımları [deploy/HETZNER.md](deploy/HETZNER.md) dosyasındadır.
 
 Ubuntu/Debian tabanlı bir sunucuda Docker ve Docker Compose kurulduktan sonra:
 
