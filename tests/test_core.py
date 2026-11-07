@@ -7,6 +7,27 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_scene_sequence_keeps_empty_scenes_uploads_and_speed_edits(self):
+        originals = {"download_stock_video": server.download_stock_video, "build_scene_clip": server.build_scene_clip, "run_ffmpeg": server.run_ffmpeg, "update_job": server.update_job}
+        calls = []
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source = root / "upload.mp4"; source.write_bytes(b"video")
+                server.download_stock_video = lambda media, user_id=None: source
+                server.build_scene_clip = lambda src, target, width, height, duration, index, speed=1: (target.write_bytes(b"clip"), calls.append((src, duration, index, speed)))
+                server.run_ffmpeg = lambda command: Path(command[-1]).write_bytes(b"sequence")
+                server.update_job = lambda *args, **kwargs: None
+                sequence = server.build_scene_sequence("job", [
+                    {"media": {"uploadId": "upload-1"}, "duration": 2, "speed": 1.5},
+                    {"duration": 3, "speed": 0.75},
+                ], 5, 640, 360, root, "user")
+                self.assertTrue(sequence.is_file())
+                self.assertEqual(source, calls[0][0])
+                self.assertIsNone(calls[1][0])
+                self.assertEqual([1.5, 0.75], [call[3] for call in calls])
+        finally:
+            for name, value in originals.items(): setattr(server, name, value)
+
     def test_self_registration_records_legal_acceptance_and_support(self):
         originals = {"DATA": server.DATA, "OUTPUTS": server.OUTPUTS, "VOICES": server.VOICES, "MEDIA_CACHE": server.MEDIA_CACHE, "GENERATED_IMAGES": server.GENERATED_IMAGES, "TRAINING_VIDEOS": server.TRAINING_VIDEOS, "UPLOADS": server.UPLOADS, "DB_PATH": server.DB_PATH, "REGISTRATION_ENABLED": server.REGISTRATION_ENABLED}
         try:

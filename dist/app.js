@@ -62,9 +62,10 @@ async function startRender(){
  try{
   const estimate=await api('/api/cost-estimate',{method:'POST',body:JSON.stringify(projectPayload())});
   $('#renderCost').textContent=estimate.totalCredits+' kredi';
-  $('#renderNote').textContent=`Bakiyen ${estimate.availableCredits} kredi. Bu üretim ${estimate.totalCredits} kredi kullanacak.`;
+  const speedEdits=state.scenes.filter(scene=>Number(scene.speed||1)!==1).length;
+  $('#renderNote').textContent=`${state.scenes.length} sahne · ${Math.max(0,state.scenes.length-1)} kesme${speedEdits?` · ${speedEdits} hız düzenlemesi`:''} · ${estimate.totalCredits} kredi`;
   if(estimate.availableCredits<estimate.totalCredits)throw new Error(`Yetersiz kredi: ${estimate.totalCredits} gerekli, bakiyende ${estimate.availableCredits} var`);
-  if(!state.voiceId){$('#renderNote').textContent='Seslendirme sunucuda hazırlanıyor.';try{const voice=await api('/api/voices/generate',{method:'POST',body:JSON.stringify({text:$('#script').value})});state.voiceId=voice.id;$('#voiceStatus').textContent='Türkçe · Render seslendirmesi hazır'}catch(error){$('#voiceStatus').textContent='Sunucu sesi yok · sessiz render';$('#renderNote').textContent='Sunucu sesi kullanılamadı; video sessiz hazırlanacak.'}}
+  if(!state.voiceId){$('#renderNote').textContent='Timeline seslendirmesi sunucuda hazırlanıyor.';try{const narration=state.scenes.map(scene=>scene.sub).filter(Boolean).join(' ');const voice=await api('/api/voices/generate',{method:'POST',body:JSON.stringify({text:narration||$('#script').value})});state.voiceId=voice.id;$('#voiceStatus').textContent='Türkçe · Timeline seslendirmesi hazır'}catch(error){$('#voiceStatus').textContent='Sunucu sesi yok · sessiz render';$('#renderNote').textContent='Sunucu sesi kullanılamadı; video sessiz hazırlanacak.'}}
   const project=await persistProject();
   const job=await api('/api/renders',{method:'POST',body:JSON.stringify({projectId:project.id})});
   $('#renderTitle').textContent='Videon işleniyor';pollRender(job.id);

@@ -1989,15 +1989,18 @@ def run_ffmpeg(command: list[str]) -> None:
         raise RuntimeError(result.stderr[-4000:])
 
 
-def build_scene_clip(source: Path | None, target: Path, width: int, height: int, duration: float, index: int) -> None:
+def build_scene_clip(source: Path | None, target: Path, width: int, height: int, duration: float, index: int, speed: float = 1.0) -> None:
+    speed = max(0.5, min(2.0, float(speed or 1.0)))
+    base_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,fps=30,format=yuv420p"
     common = [
-        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,fps=30,format=yuv420p",
+        "-vf", base_filter,
         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-t", f"{duration:.3f}", str(target),
     ]
     if source and source.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
         command = [FFMPEG, "-y", "-loop", "1", "-i", str(source), *common]
     elif source:
-        command = [FFMPEG, "-y", "-stream_loop", "-1", "-i", str(source), *common]
+        video_filter = f"setpts=PTS/{speed:.3f},{base_filter}"
+        command = [FFMPEG, "-y", "-stream_loop", "-1", "-i", str(source), "-vf", video_filter, *common[2:]]
     else:
         colors = ["#173e39", "#5c3f78", "#345c74", "#874e3e", "#315248"]
         command = [FFMPEG, "-y", "-f", "lavfi", "-i", f"color=c={colors[index % len(colors)]}:s={width}x{height}:r=30:d={duration}", *common]
@@ -2005,7 +2008,7 @@ def build_scene_clip(source: Path | None, target: Path, width: int, height: int,
 
 
 def build_scene_sequence(job_id: str, scenes: list[dict], duration: int, width: int, height: int, job_dir: Path, user_id: str | None = None) -> Path | None:
-    if not any(isinstance(scene.get("media"), dict) and (scene["media"].get("videoUrl") or scene["media"].get("imageUrl")) for scene in scenes):
+    if not scenes:
         return None
     fallback_duration = duration / max(1, len(scenes))
     clips_dir = job_dir / "clips"
@@ -2013,10 +2016,11 @@ def build_scene_sequence(job_id: str, scenes: list[dict], duration: int, width: 
     clip_paths = []
     for index, scene in enumerate(scenes):
         media = scene.get("media") if isinstance(scene.get("media"), dict) else None
-        source = download_stock_video(media, user_id) if media and (media.get("videoUrl") or media.get("imageUrl")) else None
+        has_source = media and any(media.get(key) for key in ("videoUrl", "imageUrl", "uploadId", "assetId"))
+        source = download_stock_video(media, user_id) if has_source else None
         scene_duration = max(0.25, float(scene.get("duration") or fallback_duration))
         target = clips_dir / f"scene-{index:03}.mp4"
-        build_scene_clip(source, target, width, height, scene_duration, index)
+        build_scene_clip(source, target, width, height, scene_duration, index, float(scene.get("speed") or 1.0))
         clip_paths.append(target)
         update_job(job_id, progress=min(70, 25 + int((index + 1) / len(scenes) * 45)))
     concat_file = clips_dir / "concat.txt"
