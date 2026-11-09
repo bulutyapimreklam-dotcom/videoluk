@@ -1922,6 +1922,7 @@ def voice_engine_ready() -> bool:
 def valid_audio_file(path: Path) -> bool:
     if not path.is_file() or path.stat().st_size < 1024:
         return False
+    return audio_duration(path) >= 0.25
 
 
 def audio_duration(path: Path) -> float:
@@ -1935,14 +1936,6 @@ def audio_duration(path: Path) -> float:
         return max(0.0, float((getattr(probe, "stdout", "0") or "0").strip())) if probe.returncode == 0 else 0.0
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0.0
-    try:
-        probe = subprocess.run(
-            [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
-            capture_output=True, text=True, timeout=20,
-        )
-        return probe.returncode == 0 and float((probe.stdout or "0").strip()) >= 0.25
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return False
 
 
 def generate_voice(text: str) -> dict:
