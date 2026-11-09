@@ -1989,18 +1989,44 @@ def run_ffmpeg(command: list[str]) -> None:
         raise RuntimeError(result.stderr[-4000:])
 
 
-def build_scene_clip(source: Path | None, target: Path, width: int, height: int, duration: float, index: int, speed: float = 1.0) -> None:
+def build_scene_clip(
+    source: Path | None,
+    target: Path,
+    width: int,
+    height: int,
+    duration: float,
+    index: int,
+    speed: float = 1.0,
+    start_time: float = 0.0,
+) -> None:
     speed = max(0.5, min(2.0, float(speed or 1.0)))
-    base_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,fps=30,format=yuv420p"
+    start_time = max(0.0, min(3600.0, float(start_time or 0.0)))
+    # A restrained finishing pass keeps mixed stock sources visually coherent.
+    base_filter = (
+        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},setsar=1,fps=30,"
+        "eq=contrast=1.035:saturation=1.045:brightness=-0.008,"
+        "vignette=PI/7,format=yuv420p"
+    )
     common = [
         "-vf", base_filter,
         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-t", f"{duration:.3f}", str(target),
     ]
     if source and source.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
-        command = [FFMPEG, "-y", "-loop", "1", "-i", str(source), *common]
+        zoom = 1.0 + min(0.08, duration * 0.0025)
+        image_filter = (
+            f"scale={width * 2}:{height * 2}:force_original_aspect_ratio=increase,"
+            f"crop={width * 2}:{height * 2},"
+            f"zoompan=z='min(zoom+0.00035,{zoom:.4f})':d=1:s={width}x{height}:fps=30,"
+            "eq=contrast=1.035:saturation=1.045:brightness=-0.008,vignette=PI/7,format=yuv420p"
+        )
+        command = [FFMPEG, "-y", "-loop", "1", "-i", str(source), "-vf", image_filter, *common[2:]]
     elif source:
         video_filter = f"setpts=PTS/{speed:.3f},{base_filter}"
-        command = [FFMPEG, "-y", "-stream_loop", "-1", "-i", str(source), "-vf", video_filter, *common[2:]]
+        command = [
+            FFMPEG, "-y", "-stream_loop", "-1", "-ss", f"{start_time:.3f}",
+            "-i", str(source), "-vf", video_filter, *common[2:]
+        ]
     else:
         colors = ["#173e39", "#5c3f78", "#345c74", "#874e3e", "#315248"]
         command = [FFMPEG, "-y", "-f", "lavfi", "-i", f"color=c={colors[index % len(colors)]}:s={width}x{height}:r=30:d={duration}", *common]
@@ -2014,19 +2040,48 @@ def build_scene_sequence(job_id: str, scenes: list[dict], duration: int, width: 
     clips_dir = job_dir / "clips"
     clips_dir.mkdir(exist_ok=True)
     clip_paths = []
+    scene_durations = []
+    transition_duration = 0.35 if len(scenes) > 1 else 0.0
     for index, scene in enumerate(scenes):
         media = scene.get("media") if isinstance(scene.get("media"), dict) else None
         has_source = media and any(media.get(key) for key in ("videoUrl", "imageUrl", "uploadId", "assetId"))
         source = download_stock_video(media, user_id) if has_source else None
         scene_duration = max(0.25, float(scene.get("duration") or fallback_duration))
+        scene_durations.append(scene_duration)
+        # The outgoing overlap is added to the source clip so transitions do not
+        # shorten the requested project duration.
+        rendered_duration = scene_duration + (transition_duration if index < len(scenes) - 1 else 0.0)
         target = clips_dir / f"scene-{index:03}.mp4"
-        build_scene_clip(source, target, width, height, scene_duration, index, float(scene.get("speed") or 1.0))
+        build_scene_clip(
+            source, target, width, height, rendered_duration, index,
+            float(scene.get("speed") or 1.0), float(scene.get("startTime") or 0.0),
+        )
         clip_paths.append(target)
         update_job(job_id, progress=min(70, 25 + int((index + 1) / len(scenes) * 45)))
-    concat_file = clips_dir / "concat.txt"
-    concat_file.write_text("\n".join(f"file '{path.as_posix()}'" for path in clip_paths), encoding="utf-8")
     sequence = job_dir / "scene-sequence.mp4"
-    run_ffmpeg([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(sequence)])
+    if len(clip_paths) == 1:
+        shutil.copyfile(clip_paths[0], sequence)
+        return sequence
+
+    command = [FFMPEG, "-y"]
+    for clip_path in clip_paths:
+        command += ["-i", str(clip_path)]
+    filters = []
+    previous = "0:v"
+    offset = scene_durations[0]
+    for index in range(1, len(clip_paths)):
+        output = f"vx{index}"
+        filters.append(
+            f"[{previous}][{index}:v]xfade=transition=fade:duration={transition_duration:.3f}:offset={offset:.3f}[{output}]"
+        )
+        previous = output
+        offset += scene_durations[index]
+    command += [
+        "-filter_complex", ";".join(filters), "-map", f"[{previous}]", "-an",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
+        "-t", f"{sum(scene_durations):.3f}", str(sequence),
+    ]
+    run_ffmpeg(command)
     return sequence
 
 

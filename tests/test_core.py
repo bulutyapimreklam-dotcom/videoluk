@@ -14,7 +14,7 @@ class VideolukCoreTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary); source = root / "upload.mp4"; source.write_bytes(b"video")
                 server.download_stock_video = lambda media, user_id=None: source
-                server.build_scene_clip = lambda src, target, width, height, duration, index, speed=1: (target.write_bytes(b"clip"), calls.append((src, duration, index, speed)))
+                server.build_scene_clip = lambda src, target, width, height, duration, index, speed=1, start_time=0: (target.write_bytes(b"clip"), calls.append((src, duration, index, speed, start_time)))
                 server.run_ffmpeg = lambda command: Path(command[-1]).write_bytes(b"sequence")
                 server.update_job = lambda *args, **kwargs: None
                 sequence = server.build_scene_sequence("job", [
