@@ -7,6 +7,18 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_semantic_shot_plan_changes_visuals_with_story_beats(self):
+        script = ("Sabah vapurda küçük bir zarf bulundu. Yaşlı adam mektubu okudu. "
+                  "Tramvaydaki öğrenci cesaretini topladı. Akşam zarf yeniden vapura döndü.")
+        plan = server.build_semantic_shot_plan(script, 30)
+        self.assertTrue(plan["synchronized"])
+        self.assertGreaterEqual(len(plan["shots"]), 4)
+        self.assertAlmostEqual(30, sum(shot["duration"] for shot in plan["shots"]), places=2)
+        queries = [shot["mediaQuery"] for shot in plan["shots"]]
+        self.assertGreaterEqual(len(set(queries)), 4)
+        self.assertTrue(any("envelope" in query for query in queries))
+        self.assertTrue(any("student" in query for query in queries))
+
     def test_scene_sequence_keeps_empty_scenes_uploads_and_speed_edits(self):
         originals = {"download_stock_video": server.download_stock_video, "build_scene_clip": server.build_scene_clip, "run_ffmpeg": server.run_ffmpeg, "update_job": server.update_job}
         calls = []

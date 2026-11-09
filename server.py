@@ -1361,6 +1361,73 @@ def validate_script_request(payload: dict) -> tuple[str, int, str, str]:
     return idea, duration, video_type, tone
 
 
+VISUAL_QUERY_RULES = (
+    (("zarf", "mektup"), "close up envelope letter hands"),
+    (("yaşlı", "ihtiyar"), "elderly man waiting city portrait"),
+    (("öğrenci",), "young student public transport thoughtful"),
+    (("tramvay",), "Istanbul tram street people"),
+    (("vapur", "iskele"), "Istanbul ferry pier passengers"),
+    (("boğaz", "istanbul"), "Istanbul Bosphorus city cinematic"),
+    (("özür", "telefon"), "person making emotional phone call"),
+    (("hayal", "ilk adım", "cesaret"), "person walking forward hopeful city"),
+    (("akşam", "karanlık", "ışık"), "Istanbul night lights ferry"),
+)
+
+
+def visual_media_query(text: str) -> str:
+    folded = text.casefold()
+    matches = [query for terms, query in VISUAL_QUERY_RULES if any(term in folded for term in terms)]
+    if matches:
+        return " ".join(dict.fromkeys(" ".join(matches).split()))[:180]
+    words = re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü]{4,}", text)
+    stopwords = {"olan", "olarak", "için", "gibi", "daha", "sonra", "kadar", "yine", "yalnızca", "küçük", "bugün"}
+    useful = [word for word in words if word.casefold() not in stopwords]
+    return " ".join(useful[:6]) or "cinematic people city story"
+
+
+def build_semantic_shot_plan(script: str, duration: int) -> dict:
+    clean = " ".join(str(script or "").split()).strip()
+    if len(clean) < 10:
+        raise ValueError("Kurgu planı için yeterli bir metin yaz")
+    duration = max(15, min(300, int(duration or 30)))
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", clean) if part.strip()]
+    beats = []
+    for sentence in sentences:
+        clauses = [part.strip() for part in re.split(r"[;:,]\s+", sentence) if part.strip()]
+        for clause in clauses:
+            if beats and len(clause.split()) < 4:
+                beats[-1] = f"{beats[-1]} {clause}"
+            else:
+                beats.append(clause)
+    target = max(3, min(14, round(duration / 5)))
+    while len(beats) > target:
+        pair_index = min(range(len(beats) - 1), key=lambda index: len(beats[index].split()) + len(beats[index + 1].split()))
+        beats[pair_index:pair_index + 2] = [f"{beats[pair_index]} {beats[pair_index + 1]}"]
+    while len(beats) < min(target, 3) and beats:
+        longest = max(range(len(beats)), key=lambda index: len(beats[index].split()))
+        words = beats[longest].split()
+        middle = len(words) // 2
+        beats[longest:longest + 1] = [" ".join(words[:middle]), " ".join(words[middle:])]
+    weights = [max(3, len(re.findall(r"\w+", beat))) for beat in beats]
+    total_weight = sum(weights) or 1
+    raw = [max(2.5, duration * weight / total_weight) for weight in weights]
+    scale = duration / sum(raw)
+    shot_durations = [round(value * scale, 3) for value in raw]
+    shot_durations[-1] = round(duration - sum(shot_durations[:-1]), 3)
+    shots = []
+    cursor = 0.0
+    for index, (beat, shot_duration) in enumerate(zip(beats, shot_durations)):
+        title_words = re.sub(r"[.!?]+$", "", beat).split()[:7]
+        shots.append({
+            "id": f"shot-{index + 1}", "title": " ".join(title_words), "subtitle": beat,
+            "mediaQuery": visual_media_query(beat), "duration": shot_duration,
+            "start": round(cursor, 3),
+            "editingReason": "Anlatıdaki yeni görsel fikir başladığı için plan değişir",
+        })
+        cursor += shot_duration
+    return {"duration": duration, "shots": shots, "strategy": "semantic-beats", "synchronized": True}
+
+
 def normalize_editing_rules(rules: object) -> dict:
     if not isinstance(rules, dict):
         raise ValueError("Kurgu kuralları nesne biçiminde olmalı")
@@ -2575,6 +2642,11 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 return
             if route == "/api/scripts/generate":
                 self.send_json(HTTPStatus.OK, generate_ai_script(body))
+                return
+            if route == "/api/storyboard/plan":
+                self.send_json(HTTPStatus.OK, build_semantic_shot_plan(
+                    str(body.get("script") or ""), int(body.get("duration") or 30)
+                ))
                 return
             if route == "/api/editing-profiles":
                 profile_id = str(body.get("id") or uuid.uuid4())
