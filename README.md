@@ -139,7 +139,7 @@ Biyografi ve “kimdir?” türündeki bilgi isteyen içeriklerde, harici dil mo
 
 ## Stok video ve seslendirme
 
-Pexels üzerinden ücretsiz stok video aramak için `.env` dosyasına `VIDEOLUK_PEXELS_API_KEY` ekleyin. Anahtar yoksa sistem Wikimedia Commons üzerinde anahtarsız görsel aramasına geçer. Arayüz kaynak, üretici ve lisans bilgisini sonuçlarla birlikte gösterir. Seçilen medya render sırasında indirilir, güvenli alan adı kontrolünden geçirilir, 200 MB sınırıyla önbelleğe alınır ve sahnenin yönüne/süresine göre FFmpeg ile kadrajlanır.
+Coverr üzerinden stok video aramak için `.env` dosyasına `VIDEOLUK_COVERR_API_KEY` ekleyin. Coverr yapılandırılmamışsa sistem sırasıyla Pexels ve Wikimedia Commons yedeklerine geçer. Arayüz kaynak, üretici ve lisans bilgisini sonuçlarla birlikte gösterir. Seçilen medya render sırasında indirilir, güvenli alan adı kontrolünden geçirilir, 200 MB sınırıyla önbelleğe alınır ve sahnenin yönüne/süresine göre FFmpeg ile kadrajlanır.
 
 Sahne oluşturma artık seçilen kaynağa göre medyayı otomatik hazırlar. **Stok görüntü** seçilirse her sahne için Pexels/Wikimedia aranır. **Yapay zekâ** seçilirse `VIDEOLUK_IMAGE_URL`, `VIDEOLUK_IMAGE_MODEL` ve `VIDEOLUK_IMAGE_API_KEY` ile tanımlanan OpenAI uyumlu görsel servisi kullanılır. Görsel motoru bağlı değilse üretim durmaz; sistem bunu arayüzde bildirip otomatik olarak ücretsiz stok medyaya geçer. Üretilen görseller sunucudaki kalıcı veri alanında saklanır ve render motoruna yerel dosya olarak aktarılır.
 

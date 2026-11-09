@@ -333,6 +333,7 @@ class VideolukCoreTests(unittest.TestCase):
 
     def test_stock_url_guard(self):
         self.assertTrue(server.validate_stock_url("https://upload.wikimedia.org/example.jpg"))
+        self.assertTrue(server.validate_stock_url("https://storage.coverr.co/videos/example.mp4"))
         with self.assertRaises(ValueError):
             server.validate_stock_url("http://127.0.0.1/private.mp4")
         with self.assertRaises(ValueError):

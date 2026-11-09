@@ -67,6 +67,7 @@ SECURE_COOKIES = os.getenv("VIDEOLUK_SECURE_COOKIES", "0").lower() in {"1", "tru
 SESSION_TTL_DAYS = max(1, min(90, int(os.getenv("VIDEOLUK_SESSION_TTL_DAYS", "14"))))
 LOCAL_USER_ID = "local-owner"
 PEXELS_API_KEY = os.getenv("VIDEOLUK_PEXELS_API_KEY", "")
+COVERR_API_KEY = os.getenv("VIDEOLUK_COVERR_API_KEY", "")
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
 MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
 MAX_UPLOAD_BYTES = int(os.getenv("VIDEOLUK_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
@@ -1118,7 +1119,7 @@ def production_readiness() -> dict:
         {"id": "render", "category": "Motor", "label": "FFmpeg render motoru", "ready": bool(shutil.which(FFMPEG)), "betaRequired": True, "commercialRequired": True, "detail": "Sunucuda MP4 ve SRT üretir."},
         {"id": "text", "category": "İçerik", "label": "Yapay zekâ metin sağlayıcısı", "ready": bool(LLM_URL and LLM_MODEL), "betaRequired": False, "commercialRequired": False, "detail": "Eksikse yerel metin motoru çalışır; kalite testi için sağlayıcı önerilir."},
         {"id": "image", "category": "İçerik", "label": "Yapay zekâ görsel sağlayıcısı", "ready": bool(IMAGE_URL and IMAGE_MODEL), "betaRequired": False, "commercialRequired": False, "detail": "Eksikse stok veya kullanıcı yüklemesi kullanılır."},
-        {"id": "stock", "category": "İçerik", "label": "Pexels stok sağlayıcısı", "ready": bool(PEXELS_API_KEY), "betaRequired": False, "commercialRequired": False, "detail": "Eksikse Wikimedia Commons yedeği kullanılabilir."},
+        {"id": "stock", "category": "İçerik", "label": "Video stok sağlayıcısı", "ready": bool(COVERR_API_KEY or PEXELS_API_KEY), "betaRequired": False, "commercialRequired": False, "detail": "Coverr veya Pexels yoksa yalnızca Wikimedia Commons yedeği kullanılabilir."},
         {"id": "voice", "category": "Motor", "label": "Sunucu seslendirmesi", "ready": voice_engine_ready(), "betaRequired": True, "commercialRequired": True, "detail": "Yerel TTS ile ses dosyası üretir."},
         {"id": "auth", "category": "Güvenlik", "label": "Zorunlu kullanıcı girişi", "ready": bool(AUTH_REQUIRED and ADMIN_EMAIL and ADMIN_PASSWORD), "betaRequired": False, "commercialRequired": True, "detail": "Ticari yayında hesapları ve projeleri ayırır."},
         {"id": "https", "category": "Yayın", "label": "HTTPS alan adı", "ready": PUBLIC_BASE_URL.startswith("https://"), "betaRequired": False, "commercialRequired": True, "detail": "Sunucu alınana kadar kapalı kalabilir."},
@@ -1742,6 +1743,8 @@ def search_stock_videos(query: str, orientation: str, per_page: int = 8) -> dict
     clean_query = " ".join(query.split()).strip()
     if len(clean_query) < 2:
         raise ValueError("Arama için en az iki karakter yaz")
+    if COVERR_API_KEY:
+        return search_coverr_videos(clean_query, orientation, per_page)
     if not PEXELS_API_KEY:
         return search_commons_images(clean_query, per_page)
     orientation_map = {"vertical": "portrait", "horizontal": "landscape", "square": "square"}
@@ -1780,6 +1783,47 @@ def search_stock_videos(query: str, orientation: str, per_page: int = 8) -> dict
         return {"configured": True, "provider": "pexels", "results": results}
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise ValueError(f"Stok servisine ulaşılamadı: {exc}") from exc
+
+
+def search_coverr_videos(query: str, orientation: str, per_page: int = 12) -> dict:
+    params = urlencode({
+        "query": query, "page_size": max(1, min(20, per_page)),
+        "urls": "true", "sort": "popular",
+    })
+    request = Request(
+        f"https://api.coverr.co/videos?{params}",
+        headers={"x-api-key": COVERR_API_KEY, "User-Agent": "Videoluk/0.2"},
+    )
+    try:
+        with urlopen(request, timeout=25) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        results = []
+        for video in data.get("hits", []):
+            is_vertical = bool(video.get("is_vertical"))
+            if orientation == "vertical" and not is_vertical:
+                continue
+            if orientation == "horizontal" and is_vertical:
+                continue
+            urls = video.get("urls") if isinstance(video.get("urls"), dict) else {}
+            video_url = urls.get("mp4") or urls.get("mp4_download")
+            if not video_url:
+                continue
+            width, height = int(video.get("max_width") or 0), int(video.get("max_height") or 0)
+            technical = min(1.0, max(width, height) / 1920) if width and height else 0.5
+            results.append({
+                "id": f"coverr-{video.get('id')}", "provider": "coverr", "mediaType": "video",
+                "title": str(video.get("title") or "Coverr video"),
+                "description": str(video.get("description") or ""),
+                "tags": video.get("tags") or [], "thumbnail": video.get("thumbnail") or video.get("poster"),
+                "videoUrl": video_url, "previewUrl": urls.get("mp4_preview"),
+                "duration": float(video.get("duration") or 0), "width": width, "height": height,
+                "creator": "Coverr", "sourceUrl": f"https://coverr.co/videos/{video.get('id')}",
+                "license": "Coverr License", "technicalScore": round(technical, 3),
+            })
+        results.sort(key=lambda item: (item["technicalScore"], item["duration"]), reverse=True)
+        return {"configured": True, "provider": "coverr", "results": results}
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Coverr stok servisine ulaşılamadı: {exc}") from exc
 
 
 def search_commons_images(query: str, per_page: int = 8) -> dict:
@@ -1980,6 +2024,7 @@ def validate_stock_url(url: str) -> str:
     hostname = (parsed.hostname or "").lower()
     allowed = (
         hostname == "pexels.com" or hostname.endswith(".pexels.com")
+        or hostname == "coverr.co" or hostname.endswith(".coverr.co")
         or hostname == "vimeo.com" or hostname.endswith(".vimeo.com")
         or hostname == "wikimedia.org" or hostname.endswith(".wikimedia.org")
     )
@@ -2915,7 +2960,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "model": LLM_MODEL or None,
                 "imageEngine": "ai" if IMAGE_URL and IMAGE_MODEL else "stock-fallback",
                 "imageModel": IMAGE_MODEL or None,
-                "stockProvider": "pexels" if PEXELS_API_KEY else None,
+                "stockProvider": "coverr" if COVERR_API_KEY else "pexels" if PEXELS_API_KEY else None,
                 "voiceEngine": "system-tts" if voice_engine_ready() else None,
                 "authRequired": AUTH_REQUIRED,
                 "authReady": bool(not AUTH_REQUIRED or (ADMIN_EMAIL and ADMIN_PASSWORD)),
