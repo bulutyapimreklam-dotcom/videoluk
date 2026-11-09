@@ -18,6 +18,8 @@ class VideolukCoreTests(unittest.TestCase):
         self.assertGreaterEqual(len(set(queries)), 4)
         self.assertTrue(any("envelope" in query for query in queries))
         self.assertTrue(any("student" in query for query in queries))
+        self.assertTrue(all(shot["semantic"] for shot in plan["shots"]))
+        self.assertTrue(all(len(query.split()) <= 6 for query in queries))
 
     def test_scene_sequence_keeps_empty_scenes_uploads_and_speed_edits(self):
         originals = {"download_stock_video": server.download_stock_video, "build_scene_clip": server.build_scene_clip, "run_ffmpeg": server.run_ffmpeg, "update_job": server.update_job}

@@ -1362,23 +1362,25 @@ def validate_script_request(payload: dict) -> tuple[str, int, str, str]:
 
 
 VISUAL_QUERY_RULES = (
-    (("zarf", "mektup"), "close up envelope letter hands"),
-    (("yaşlı", "ihtiyar"), "elderly man waiting city portrait"),
     (("öğrenci",), "young student public transport thoughtful"),
-    (("tramvay",), "Istanbul tram street people"),
-    (("vapur", "iskele"), "Istanbul ferry pier passengers"),
-    (("boğaz", "istanbul"), "Istanbul Bosphorus city cinematic"),
+    (("yaşlı", "ihtiyar"), "elderly old man waiting"),
     (("özür", "telefon"), "person making emotional phone call"),
     (("hayal", "ilk adım", "cesaret"), "person walking forward hopeful city"),
     (("akşam", "karanlık", "ışık"), "Istanbul night lights ferry"),
+    (("zarf", "mektup"), "envelope letter hands"),
+    (("tramvay",), "Istanbul tram street passengers"),
+    (("vapur", "iskele"), "Istanbul ferry pier passengers"),
+    (("boğaz", "istanbul"), "Istanbul Bosphorus city cinematic"),
 )
 
 
 def visual_media_query(text: str) -> str:
     folded = text.casefold()
-    matches = [query for terms, query in VISUAL_QUERY_RULES if any(term in folded for term in terms)]
-    if matches:
-        return " ".join(dict.fromkeys(" ".join(matches).split()))[:180]
+    # One shot should express one dominant visual idea. Combining every keyword
+    # creates broad searches that frequently return editorially unrelated media.
+    for terms, query in VISUAL_QUERY_RULES:
+        if any(term in folded for term in terms):
+            return query
     words = re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü]{4,}", text)
     stopwords = {"olan", "olarak", "için", "gibi", "daha", "sonra", "kadar", "yine", "yalnızca", "küçük", "bugün"}
     useful = [word for word in words if word.casefold() not in stopwords]
@@ -1421,7 +1423,7 @@ def build_semantic_shot_plan(script: str, duration: int) -> dict:
         shots.append({
             "id": f"shot-{index + 1}", "title": " ".join(title_words), "subtitle": beat,
             "mediaQuery": visual_media_query(beat), "duration": shot_duration,
-            "start": round(cursor, 3),
+            "start": round(cursor, 3), "semantic": True,
             "editingReason": "Anlatıdaki yeni görsel fikir başladığı için plan değişir",
         })
         cursor += shot_duration
@@ -1811,14 +1813,33 @@ def search_commons_images(query: str, per_page: int = 8) -> dict:
                 creator = metadata.get("Artist", {}).get("value") or metadata.get("Credit", {}).get("value") or "Wikimedia Commons"
                 creator = html.unescape(re.sub(r"<[^>]+>", " ", creator))
                 creator = " ".join(creator.split())
+                title = str(page.get("title") or "").removeprefix("File:")
+                query_words = {word.casefold() for word in re.findall(r"[A-Za-z]{4,}", clean_query)}
+                title_words = {word.casefold() for word in re.findall(r"[A-Za-z]{4,}", title)}
+                synonyms = {
+                    "elderly": {"elderly", "older", "aged", "senior"},
+                    "student": {"student", "school", "college", "university"},
+                    "envelope": {"envelope", "letter", "mail"},
+                    "letter": {"letter", "envelope", "mail"},
+                    "tram": {"tram", "streetcar", "tramway"},
+                    "ferry": {"ferry", "boat", "ship"},
+                    "phone": {"phone", "telephone", "mobile"},
+                }
+                concepts = [synonyms.get(word, {word}) for word in query_words]
+                matched = sum(1 for concept in concepts if concept & title_words)
+                relevance = matched / max(1, min(3, len(concepts)))
+                if relevance < 0.32:
+                    continue
                 results.append({
                     "id": str(page.get("pageid")), "mediaType": "image",
+                    "title": title, "relevance": round(relevance, 3),
                     "thumbnail": info.get("thumburl") or image_url, "imageUrl": image_url,
                     "creator": creator[:160], "duration": None,
                     "sourceUrl": info.get("descriptionurl"),
                     "license": metadata.get("LicenseShortName", {}).get("value") or "Commons lisansı",
                 })
             if results:
+                results.sort(key=lambda item: item.get("relevance", 0), reverse=True)
                 used_variant = variant
                 break
         return {"configured": True, "provider": "wikimedia", "queryUsed": used_variant, "results": results}
