@@ -89,6 +89,9 @@ SESSION_TTL_DAYS = max(1, min(90, int(os.getenv("VIDEOLUK_SESSION_TTL_DAYS", "14
 LOCAL_USER_ID = "local-owner"
 PEXELS_API_KEY = os.getenv("VIDEOLUK_PEXELS_API_KEY", "")
 COVERR_API_KEY = os.getenv("VIDEOLUK_COVERR_API_KEY", "")
+COVERR_SEARCH_CACHE: dict[tuple[str, str, int], tuple[float, dict]] = {}
+COVERR_CACHE_LOCK = threading.Lock()
+COVERR_CACHE_TTL_SECONDS = 3600
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
 MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
 MAX_UPLOAD_BYTES = int(os.getenv("VIDEOLUK_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
@@ -1806,9 +1809,47 @@ def search_stock_videos(query: str, orientation: str, per_page: int = 8) -> dict
         raise ValueError(f"Stok servisine ulaşılamadı: {exc}") from exc
 
 
+STOCK_TERM_TRANSLATIONS = {
+    "vapur": "ferry", "iskele": "pier", "gemi": "ship", "deniz": "sea",
+    "şehir": "city", "sokak": "street", "kalabalık": "crowd", "insanlar": "people",
+    "mektup": "letter", "zarf": "envelope", "yazı": "writing", "defter": "notebook",
+    "telefon": "phone", "kadın": "woman", "adam": "man", "yaşlı": "elderly",
+    "öğrenci": "student", "çanta": "luggage", "yardım": "helping", "yürüyüş": "walking",
+    "günbatımı": "sunset", "gün": "day", "akşam": "evening", "gece": "night",
+    "tramvay": "tram", "tren": "train", "metro": "subway", "araba": "car",
+    "ofis": "office", "okul": "school", "doğa": "nature", "orman": "forest",
+}
+
+
+def coverr_query_text(query: str) -> str:
+    folded = query.casefold().replace("gün batımı", "günbatımı").replace("toplu taşıma", "metro")
+    words = re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü0-9]+", folded)
+    translated = [STOCK_TERM_TRANSLATIONS.get(word, word) for word in words if word not in {"ve", "ile", "bir", "bu", "için"}]
+    return " ".join(translated)
+
+
+def coverr_semantic_match(query: str, video: dict) -> tuple[float, set[str]]:
+    query_terms = {
+        term for term in re.findall(r"[a-z0-9]+", query.casefold())
+        if len(term) > 2 and term not in {"the", "and", "with", "from", "into", "near"}
+    }
+    searchable = " ".join([
+        str(video.get("title") or ""), str(video.get("description") or ""),
+        " ".join(str(tag) for tag in (video.get("tags") or [])),
+    ]).casefold()
+    matched_terms = {term for term in query_terms if term in searchable}
+    return len(matched_terms) / max(1, len(query_terms)), matched_terms
+
+
 def search_coverr_videos(query: str, orientation: str, per_page: int = 12) -> dict:
+    cache_key = (" ".join(query.casefold().split()), orientation, max(1, min(20, per_page)))
+    with COVERR_CACHE_LOCK:
+        cached = COVERR_SEARCH_CACHE.get(cache_key)
+        if cached and time.monotonic() - cached[0] < COVERR_CACHE_TTL_SECONDS:
+            return json.loads(json.dumps(cached[1]))
+    provider_query = coverr_query_text(query)
     params = urlencode({
-        "query": query, "page_size": max(1, min(20, per_page)),
+        "query": provider_query, "page_size": max(1, min(20, per_page)),
         "urls": "true", "sort": "popular",
     })
     request = Request(
@@ -1831,6 +1872,11 @@ def search_coverr_videos(query: str, orientation: str, per_page: int = 12) -> di
                 continue
             width, height = int(video.get("max_width") or 0), int(video.get("max_height") or 0)
             technical = min(1.0, max(width, height) / 1920) if width and height else 0.5
+            semantic, matched_terms = coverr_semantic_match(provider_query, video)
+            # Coverr occasionally returns visually attractive but unrelated popular
+            # results. Do not let those silently enter an automatic storyboard.
+            if semantic < 0.34:
+                continue
             results.append({
                 "id": f"coverr-{video.get('id')}", "provider": "coverr", "mediaType": "video",
                 "title": str(video.get("title") or "Coverr video"),
@@ -1840,10 +1886,21 @@ def search_coverr_videos(query: str, orientation: str, per_page: int = 12) -> di
                 "duration": float(video.get("duration") or 0), "width": width, "height": height,
                 "creator": "Coverr", "sourceUrl": f"https://coverr.co/videos/{video.get('id')}",
                 "license": "Coverr License", "technicalScore": round(technical, 3),
+                "semanticScore": round(semantic, 3), "matchedTerms": sorted(matched_terms),
             })
-        results.sort(key=lambda item: (item["technicalScore"], item["duration"]), reverse=True)
-        return {"configured": True, "provider": "coverr", "results": results}
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        results.sort(key=lambda item: (item["semanticScore"], item["technicalScore"], item["duration"]), reverse=True)
+        response = {"configured": True, "provider": "coverr", "queryUsed": provider_query, "results": results}
+        with COVERR_CACHE_LOCK:
+            if len(COVERR_SEARCH_CACHE) >= 200:
+                oldest = min(COVERR_SEARCH_CACHE, key=lambda key: COVERR_SEARCH_CACHE[key][0])
+                COVERR_SEARCH_CACHE.pop(oldest, None)
+            COVERR_SEARCH_CACHE[cache_key] = (time.monotonic(), response)
+        return response
+    except HTTPError as exc:
+        if exc.code in {403, 429}:
+            raise ValueError("Coverr saatlik arama kotasına ulaşıldı; önbellekte olmayan yeni aramalar daha sonra yeniden denenebilir") from exc
+        raise ValueError(f"Coverr stok servisine ulaşılamadı: HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise ValueError(f"Coverr stok servisine ulaşılamadı: {exc}") from exc
 
 

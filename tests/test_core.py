@@ -7,6 +7,18 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_coverr_semantic_match_rejects_popular_but_unrelated_media(self):
+        relevant, terms = server.coverr_semantic_match(
+            "ferry sunset", {"title": "Ferry crossing at sunset", "description": "", "tags": []}
+        )
+        unrelated, _ = server.coverr_semantic_match(
+            "ferry sunset", {"title": "Tulips in the city", "description": "spring flowers", "tags": ["garden"]}
+        )
+        self.assertEqual(1.0, relevant)
+        self.assertEqual({"ferry", "sunset"}, terms)
+        self.assertEqual(0.0, unrelated)
+        self.assertEqual("ferry pier sunset", server.coverr_query_text("Vapur, iskele ve gün batımı"))
+
     def test_semantic_scenes_build_individual_voice_track(self):
         originals = {"VOICES": server.VOICES, "generate_voice": server.generate_voice, "audio_duration": server.audio_duration, "run_ffmpeg": server.run_ffmpeg}
         try:
