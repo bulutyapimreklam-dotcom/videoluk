@@ -7,6 +7,27 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_semantic_scenes_build_individual_voice_track(self):
+        originals = {"VOICES": server.VOICES, "generate_voice": server.generate_voice, "audio_duration": server.audio_duration, "run_ffmpeg": server.run_ffmpeg}
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); voices = root / "voices"; voices.mkdir(); server.VOICES = voices
+                generated = []
+                def fake_voice(text):
+                    voice_id = f"voice-{len(generated)}"; (voices / f"{voice_id}.wav").write_bytes(b"voice")
+                    generated.append(text); return {"id": voice_id}
+                server.generate_voice = fake_voice
+                server.audio_duration = lambda path: 2.0
+                server.run_ffmpeg = lambda command: Path(command[-1]).write_bytes(b"audio")
+                output = server.build_scene_voice_track([
+                    {"semantic": True, "subtitle": "Birinci anlatım.", "duration": 2},
+                    {"semantic": True, "subtitle": "İkinci anlatım.", "duration": 3},
+                ], 5, root)
+                self.assertTrue(output.is_file())
+                self.assertEqual(["Birinci anlatım.", "İkinci anlatım."], generated)
+        finally:
+            for name, value in originals.items(): setattr(server, name, value)
+
     def test_semantic_shot_plan_changes_visuals_with_story_beats(self):
         script = ("Sabah vapurda küçük bir zarf bulundu. Yaşlı adam mektubu okudu. "
                   "Tramvaydaki öğrenci cesaretini topladı. Akşam zarf yeniden vapura döndü.")

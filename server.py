@@ -1783,6 +1783,9 @@ def search_stock_videos(query: str, orientation: str, per_page: int = 8) -> dict
 
 
 def search_commons_images(query: str, per_page: int = 8) -> dict:
+    clean_query = " ".join(query.split()).strip()
+    if len(clean_query) < 2:
+        raise ValueError("Arama için en az iki karakter yaz")
     stopwords = {"bir", "ve", "ile", "için", "neden", "şimdi", "önemli", "birlikte", "bakalım", "video", "videosu", "saniyelik", "tanıtım", "anlatan", "gerçek", "merkezinde", "hazır", "mısın"}
     words = [word.strip(".,!?;:()[]\"'") for word in query.split()]
     meaningful = [word for word in words if len(word) > 2 and word.casefold() not in stopwords]
@@ -1854,6 +1857,19 @@ def voice_engine_ready() -> bool:
 def valid_audio_file(path: Path) -> bool:
     if not path.is_file() or path.stat().st_size < 1024:
         return False
+
+
+def audio_duration(path: Path) -> float:
+    if not path.is_file():
+        return 0.0
+    try:
+        probe = subprocess.run(
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, timeout=20,
+        )
+        return max(0.0, float((getattr(probe, "stdout", "0") or "0").strip())) if probe.returncode == 0 else 0.0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
     try:
         probe = subprocess.run(
             [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
@@ -1901,7 +1917,10 @@ def generate_voice(text: str) -> dict:
     if result.returncode != 0 or not valid_audio_file(target):
         target.unlink(missing_ok=True)
         raise ValueError("Seslendirme üretilemedi")
-    return {"id": voice_id, "audioUrl": f"/api/voices/{voice_id}", "provider": "system-tts"}
+    return {
+        "id": voice_id, "audioUrl": f"/api/voices/{voice_id}",
+        "provider": "system-tts", "duration": round(audio_duration(target), 3),
+    }
 
 
 def image_endpoint() -> str:
@@ -2173,6 +2192,46 @@ def build_scene_sequence(job_id: str, scenes: list[dict], duration: int, width: 
     return sequence
 
 
+def build_scene_voice_track(scenes: list[dict], duration: int, job_dir: Path) -> Path | None:
+    """Generate narration per semantic shot so every spoken beat starts with its visual."""
+    if not scenes or not any(scene.get("semantic") for scene in scenes):
+        return None
+    voice_dir = job_dir / "scene-voices"
+    voice_dir.mkdir(exist_ok=True)
+    fallback_duration = duration / max(1, len(scenes))
+    normalized = []
+    for index, scene in enumerate(scenes):
+        text = " ".join(str(scene.get("subtitle") or scene.get("sub") or "").split()).strip()
+        scene_duration = max(0.5, float(scene.get("duration") or fallback_duration))
+        target = voice_dir / f"voice-{index:03}.wav"
+        if text:
+            voice = generate_voice(text)
+            source = VOICES / f"{voice['id']}.wav"
+            source_duration = max(0.1, audio_duration(source))
+            tempo = max(0.5, min(2.0, source_duration / max(0.5, scene_duration - 0.12)))
+            run_ffmpeg([
+                FFMPEG, "-y", "-i", str(source),
+                "-af", f"atempo={tempo:.5f},apad,atrim=0:{scene_duration:.3f}",
+                "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", str(target),
+            ])
+            source.unlink(missing_ok=True)
+        else:
+            run_ffmpeg([
+                FFMPEG, "-y", "-f", "lavfi", "-i",
+                f"anullsrc=channel_layout=stereo:sample_rate=44100:d={scene_duration:.3f}",
+                "-c:a", "pcm_s16le", str(target),
+            ])
+        normalized.append(target)
+    concat_file = voice_dir / "concat.txt"
+    concat_file.write_text("\n".join(f"file '{path.as_posix()}'" for path in normalized), encoding="utf-8")
+    output = job_dir / "scene-narration.wav"
+    run_ffmpeg([
+        FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file),
+        "-t", str(duration), "-c:a", "pcm_s16le", str(output),
+    ])
+    return output
+
+
 def render(job_id: str, project: dict) -> None:
     try:
         update_job(job_id, status="rendering", progress=8)
@@ -2229,8 +2288,9 @@ def render(job_id: str, project: dict) -> None:
             )
         filter_graph = f"[0:v]{video_filters}[v]"
         voice_id = str(payload.get("voiceId") or "")
-        voice_path = VOICES / f"{voice_id}.wav"
-        audio_input = str(voice_path) if voice_id and voice_path.is_file() else f"anullsrc=channel_layout=stereo:sample_rate=44100:d={duration}"
+        voice_path = build_scene_voice_track(scenes, duration, job_dir) or (VOICES / f"{voice_id}.wav")
+        has_voice = voice_path.is_file()
+        audio_input = str(voice_path) if has_voice else f"anullsrc=channel_layout=stereo:sample_rate=44100:d={duration}"
         music_id = str(payload.get("musicId") or "")
         music_asset = uploaded_asset(music_id, user_id) if music_id else None
         music_path = Path(music_asset["file_path"]) if music_asset and music_asset["kind"] == "audio" else None
@@ -2241,7 +2301,7 @@ def render(job_id: str, project: dict) -> None:
             FFMPEG, "-y",
             *video_input,
         ]
-        if voice_id and voice_path.is_file():
+        if has_voice:
             command += ["-i", audio_input]
         else:
             command += ["-f", "lavfi", "-i", audio_input]
