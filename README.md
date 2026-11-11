@@ -123,17 +123,16 @@ Sağlık kontrolü:
 curl https://alan-adiniz.example/api/health
 ```
 
-## Yapay zekâ metin motoru
+## GPT metin ve sahne motoru
 
-Videoluk herhangi bir OpenAI-uyumlu metin servisine bağlanabilir. `.env.example` dosyasını `.env` olarak kopyalayıp aşağıdaki değerleri doldurun:
+Videoluk, OpenAI Responses API ve Structured Outputs kullanarak fikri süreye uygun Türkçe seslendirme metnine, sahnelere ve İngilizce stok arama terimlerine dönüştürür. Önerilen maliyet/kalite modeli `gpt-6.1-terra`dır. `.env` içinde yalnızca anahtarı tanımlamak yeterlidir:
 
 ```env
-VIDEOLUK_LLM_URL=https://saglayici-adresi.example
-VIDEOLUK_LLM_MODEL=model-adi
-VIDEOLUK_LLM_API_KEY=gizli-anahtar
+VIDEOLUK_OPENAI_API_KEY=gizli-anahtar
+VIDEOLUK_LLM_MODEL=gpt-6.1-terra
 ```
 
-Anahtar yalnızca sunucunun ortam değişkeninde tutulur ve tarayıcıya gönderilmez. Uzak model ayarlanmamışsa veya erişilemiyorsa Videoluk yerel, ücretsiz taslak motoruna otomatik döner. Aynı sözleşme Ollama ve diğer OpenAI-uyumlu yerel model sunucularıyla da kullanılabilir.
+Anahtar yalnızca sunucunun ortam değişkeninde tutulur ve tarayıcıya gönderilmez. GPT; fikirden sapmama, dolgu cümlelerinden kaçınma, süreye göre kelime hedefi, sahne başına yeni bilgi ve somut stok sorgusu kurallarıyla yönlendirilir. Uzak model ayarlanmamışsa veya erişilemiyorsa Videoluk yerel, ücretsiz taslak motoruna otomatik döner. `VIDEOLUK_LLM_URL` ve `VIDEOLUK_LLM_API_KEY` ile Ollama ve diğer OpenAI-uyumlu servisler de kullanılabilir.
 
 Biyografi ve “kimdir?” türündeki bilgi isteyen içeriklerde, harici dil modeli bağlı değilse Türkçe Wikipedia özeti kaynak olarak kullanılır. Böylece aynı genel cümlenin tekrarlandığı şablon yerine doğrulanabilir bilgi sahnelere ayrılır.
 

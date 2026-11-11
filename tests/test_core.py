@@ -7,6 +7,14 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_responses_api_text_and_script_schema_are_parsed_safely(self):
+        response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "{\"script\":\"Metin\"}"}]}]}
+        self.assertEqual('{"script":"Metin"}', server.response_output_text(response))
+        schema = server.videoluk_script_schema(6)
+        self.assertEqual(6, schema["properties"]["scenes"]["minItems"])
+        self.assertEqual(6, schema["properties"]["scenes"]["maxItems"])
+        self.assertIn("mediaQuery", schema["properties"]["scenes"]["items"]["required"])
+
     def test_coverr_semantic_match_rejects_popular_but_unrelated_media(self):
         relevant, terms = server.coverr_semantic_match(
             "ferry sunset", {"title": "Ferry crossing at sunset", "description": "", "tags": []}

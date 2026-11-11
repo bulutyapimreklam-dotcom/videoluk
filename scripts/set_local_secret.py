@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / ".env"
 EXAMPLE = ROOT / ".env.example"
-ALLOWED = {"VIDEOLUK_COVERR_API_KEY", "VIDEOLUK_PEXELS_API_KEY"}
+ALLOWED = {"VIDEOLUK_COVERR_API_KEY", "VIDEOLUK_PEXELS_API_KEY", "VIDEOLUK_OPENAI_API_KEY"}
 
 
 def main() -> None:

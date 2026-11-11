@@ -51,11 +51,13 @@ def load_local_env(path: Path) -> None:
             continue
         name, value = line.split("=", 1)
         name = name.strip()
-        if name not in {"VIDEOLUK_COVERR_API_KEY", "VIDEOLUK_PEXELS_API_KEY"}:
+        if name not in {"VIDEOLUK_COVERR_API_KEY", "VIDEOLUK_PEXELS_API_KEY", "VIDEOLUK_OPENAI_API_KEY", "OPENAI_API_KEY", "VIDEOLUK_LLM_URL", "VIDEOLUK_LLM_MODEL", "VIDEOLUK_LLM_API_KEY"}:
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
+        if not value:
+            continue
         os.environ.setdefault(name, value)
 
 
@@ -73,9 +75,10 @@ FFMPEG = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE = os.getenv("FFPROBE_BIN", "ffprobe")
 HOST = os.getenv("VIDEOLUK_HOST", "127.0.0.1")
 PORT = int(os.getenv("VIDEOLUK_PORT", "8787"))
-LLM_URL = os.getenv("VIDEOLUK_LLM_URL", "").rstrip("/")
-LLM_MODEL = os.getenv("VIDEOLUK_LLM_MODEL", "")
-LLM_API_KEY = os.getenv("VIDEOLUK_LLM_API_KEY", "")
+OPENAI_API_KEY = os.getenv("VIDEOLUK_OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+LLM_URL = os.getenv("VIDEOLUK_LLM_URL", "https://api.openai.com/v1/responses" if OPENAI_API_KEY else "").rstrip("/")
+LLM_MODEL = os.getenv("VIDEOLUK_LLM_MODEL", "gpt-6.1-terra" if OPENAI_API_KEY else "")
+LLM_API_KEY = os.getenv("VIDEOLUK_LLM_API_KEY", OPENAI_API_KEY)
 LLM_TIMEOUT = int(os.getenv("VIDEOLUK_LLM_TIMEOUT", "60"))
 IMAGE_URL = os.getenv("VIDEOLUK_IMAGE_URL", "").rstrip("/")
 IMAGE_MODEL = os.getenv("VIDEOLUK_IMAGE_MODEL", "")
@@ -1663,9 +1666,52 @@ def generate_biography_script(payload: dict, subject: str) -> dict:
 
 
 def llm_endpoint() -> str:
-    if LLM_URL.endswith("/chat/completions"):
+    if LLM_URL.endswith(("/chat/completions", "/responses")):
         return LLM_URL
     return f"{LLM_URL}/v1/chat/completions"
+
+
+def response_output_text(provider_response: dict) -> str:
+    direct = provider_response.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct
+    texts = []
+    for item in provider_response.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content") or []:
+            if isinstance(content, dict) and content.get("type") in {"output_text", "text"}:
+                value = content.get("text")
+                if isinstance(value, str):
+                    texts.append(value)
+    if texts:
+        return "".join(texts)
+    choices = provider_response.get("choices") or []
+    if choices:
+        return str((choices[0].get("message") or {}).get("content") or "")
+    raise ValueError("Model yanıtında metin bulunamadı")
+
+
+def videoluk_script_schema(scene_count: int) -> dict:
+    return {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "script": {"type": "string"},
+            "scenes": {
+                "type": "array", "minItems": scene_count, "maxItems": scene_count,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "title": {"type": "string"}, "subtitle": {"type": "string"},
+                        "purpose": {"type": "string", "enum": ["Kanca", "Ana fikir", "Kapanış"]},
+                        "editingReason": {"type": "string"}, "mediaQuery": {"type": "string"},
+                    },
+                    "required": ["title", "subtitle", "purpose", "editingReason", "mediaQuery"],
+                },
+            },
+        },
+        "required": ["script", "scenes"],
+    }
 
 
 def extract_json(text: str) -> dict:
@@ -1690,28 +1736,45 @@ def generate_ai_script(payload: dict) -> dict:
             except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError):
                 pass
         return generate_local_script(payload)
-    scene_count = 3 if duration <= 30 else 4 if duration <= 60 else 5
+    scene_count = max(3, min(8, round(duration / 10)))
+    target_words = round(duration * 2.15)
     system_prompt = (
-        "Sen Videoluk adlı Türkçe video üretim platformunun kıdemli senaryo yazarısın. "
-        "Kısa, doğal, klişeden uzak ve seslendirmeye uygun Türkçe yaz. Yalnızca geçerli JSON döndür. "
-        "Kurgu yönetmeninin kurallarını yaratıcı öneri değil, zorunlu yapım şartı olarak uygula. "
-        "Şema: {\"script\":\"tam metin\",\"scenes\":[{\"title\":\"kısa başlık\","
-        "\"subtitle\":\"1-2 cümle seslendirme\",\"purpose\":\"Kanca|Ana fikir|Kapanış\","
-        "\"editingReason\":\"kurgu kararının kısa gerekçesi\"}]}"
+        "Sen Videoluk adlı profesyonel video üretim platformunun kıdemli Türkçe metin yazarı ve belgesel editörüsün. "
+        "Kullanıcının verdiği fikre doğrudan odaklan. Konuyu başka bir ürün, slogan veya genel motivasyon metnine dönüştürme. "
+        "Genel bilgi/biyografi/eğitim isteklerinde doğruluğundan emin olmadığın tarih, sayı, alıntı ve olayı uydurma; "
+        "yerleşik ve genel kabul gören bilgilerle açık bir anlatı kur. Tanıtım isteklerinde yalnızca kullanıcı tarafından verilen "
+        "özellikleri kullan. İlk cümlede merak uyandır, her sahnede yeni bilgi veya anlatı ilerlemesi sağla, tekrar etme. "
+        "Klişe ifadelerden, 'hazır mısın', 'birlikte bakalım', 'gelecek şimdi başlıyor' gibi dolgu cümlelerinden kaçın. "
+        "Metin doğal Türkçe seslendirmeye uygun olsun. Sahne altyazıları birleştiğinde script ile aynı anlatıyı oluştursun. "
+        "Her sahne için Coverr stok aramasında kullanılabilecek 2-5 kelimelik, somut ve İngilizce mediaQuery yaz. "
+        "Kurgu yönetmeninin kurallarını zorunlu yapım şartı olarak uygula."
     )
     user_prompt = (
         f"Fikir: {idea}\nVideo türü: {video_type}\nTon: {tone}\nSüre: {duration} saniye\n"
         f"Kurgu yönetmeni şartnamesi: {editing_brief(profile)}\n"
-        f"Tam olarak {scene_count} sahne oluştur. Son sahne net ama abartısız bir çağrı içersin."
+        f"Yaklaşık {target_words} kelimelik, en fazla yüzde 10 sapmalı bir seslendirme yaz. "
+        f"Tam olarak {scene_count} sahne oluştur. Konu çağrı gerektirmiyorsa yapay bir satış çağrısı ekleme; "
+        "son sahne anlatıyı anlamlı bir sonuç veya düşündürücü cümleyle kapatsın."
     )
-    request_body = {
-        "model": LLM_MODEL,
-        "temperature": 0.7,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
+    responses_api = llm_endpoint().endswith("/responses")
+    if responses_api:
+        request_body = {
+            "model": LLM_MODEL, "instructions": system_prompt, "input": user_prompt,
+            "reasoning": {"effort": "low"}, "max_output_tokens": 3500,
+            "text": {"verbosity": "medium", "format": {
+                "type": "json_schema", "name": "videoluk_script",
+                "description": "Videoluk seslendirme metni ve sahne planı",
+                "strict": True, "schema": videoluk_script_schema(scene_count),
+            }},
+        }
+    else:
+        request_body = {
+            "model": LLM_MODEL, "temperature": 0.7,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
     headers = {"Content-Type": "application/json"}
     if LLM_API_KEY:
         headers["Authorization"] = f"Bearer {LLM_API_KEY}"
@@ -1724,7 +1787,7 @@ def generate_ai_script(payload: dict) -> dict:
     try:
         with urlopen(request, timeout=LLM_TIMEOUT) as response:
             provider_response = json.loads(response.read().decode("utf-8"))
-        content = provider_response["choices"][0]["message"]["content"]
+        content = response_output_text(provider_response)
         generated = extract_json(content)
         scenes = generated.get("scenes")
         script = str(generated.get("script") or "").strip()
@@ -1742,6 +1805,7 @@ def generate_ai_script(payload: dict) -> dict:
                 "subtitle": subtitle,
                 "purpose": purpose,
                 "editingReason": str(scene.get("editingReason") or "Kurgu DNA akışına uygun sahne")[:300],
+                "mediaQuery": " ".join(str(scene.get("mediaQuery") or title).split())[:180],
             })
         if len(normalized_scenes) < 2:
             raise ValueError("Model yeterli sahne oluşturmadı")
