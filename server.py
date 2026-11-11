@@ -51,7 +51,7 @@ def load_local_env(path: Path) -> None:
             continue
         name, value = line.split("=", 1)
         name = name.strip()
-        if name not in {"VIDEOLUK_COVERR_API_KEY", "VIDEOLUK_PEXELS_API_KEY", "VIDEOLUK_OPENAI_API_KEY", "OPENAI_API_KEY", "VIDEOLUK_LLM_URL", "VIDEOLUK_LLM_MODEL", "VIDEOLUK_LLM_API_KEY"}:
+        if name not in {"VIDEOLUK_COVERR_API_KEY", "VIDEOLUK_PIXABAY_API_KEY", "VIDEOLUK_PEXELS_API_KEY", "VIDEOLUK_OPENAI_API_KEY", "OPENAI_API_KEY", "VIDEOLUK_LLM_URL", "VIDEOLUK_LLM_MODEL", "VIDEOLUK_LLM_API_KEY"}:
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
@@ -92,9 +92,13 @@ SESSION_TTL_DAYS = max(1, min(90, int(os.getenv("VIDEOLUK_SESSION_TTL_DAYS", "14
 LOCAL_USER_ID = "local-owner"
 PEXELS_API_KEY = os.getenv("VIDEOLUK_PEXELS_API_KEY", "")
 COVERR_API_KEY = os.getenv("VIDEOLUK_COVERR_API_KEY", "")
+PIXABAY_API_KEY = os.getenv("VIDEOLUK_PIXABAY_API_KEY", "")
 COVERR_SEARCH_CACHE: dict[tuple[str, str, int], tuple[float, dict]] = {}
 COVERR_CACHE_LOCK = threading.Lock()
 COVERR_CACHE_TTL_SECONDS = 3600
+PIXABAY_SEARCH_CACHE: dict[tuple[str, str, int], tuple[float, dict]] = {}
+PIXABAY_CACHE_LOCK = threading.Lock()
+PIXABAY_CACHE_TTL_SECONDS = 86400
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
 MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
 MAX_UPLOAD_BYTES = int(os.getenv("VIDEOLUK_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
@@ -1867,10 +1871,38 @@ def search_stock_videos(query: str, orientation: str, per_page: int = 8) -> dict
     clean_query = " ".join(query.split()).strip()
     if len(clean_query) < 2:
         raise ValueError("Arama için en az iki karakter yaz")
+    provider_results = []
+    provider_errors = []
     if COVERR_API_KEY:
-        return search_coverr_videos(clean_query, orientation, per_page)
+        try:
+            coverr_result = search_coverr_videos(clean_query, orientation, per_page)
+            provider_results.extend(coverr_result.get("results") or [])
+        except ValueError as exc:
+            provider_errors.append(str(exc))
+    if PIXABAY_API_KEY:
+        try:
+            pixabay_result = search_pixabay_videos(clean_query, orientation, per_page)
+            provider_results.extend(pixabay_result.get("results") or [])
+        except ValueError as exc:
+            provider_errors.append(str(exc))
+    if provider_results:
+        unique = {item["id"]: item for item in provider_results}
+        ranked = sorted(
+            unique.values(),
+            key=lambda item: (item.get("semanticScore", 0), item.get("technicalScore", 0), item.get("qualityScore", 0)),
+            reverse=True,
+        )[:max(1, min(20, per_page))]
+        providers = sorted({item.get("provider") for item in ranked if item.get("provider")})
+        return {
+            "configured": True, "provider": "multi" if len(providers) > 1 else providers[0],
+            "providers": providers, "results": ranked,
+            "fallbackReason": "; ".join(provider_errors) or None,
+        }
     if not PEXELS_API_KEY:
-        return search_commons_images(clean_query, per_page)
+        fallback = search_commons_images(clean_query, per_page)
+        if provider_errors:
+            fallback["fallbackReason"] = "; ".join(provider_errors)
+        return fallback
     orientation_map = {"vertical": "portrait", "horizontal": "landscape", "square": "square"}
     params = urlencode({
         "query": clean_query,
@@ -1904,9 +1936,15 @@ def search_stock_videos(query: str, orientation: str, per_page: int = 8) -> dict
                 "creatorUrl": creator.get("url"),
                 "sourceUrl": video.get("url"),
             })
-        return {"configured": True, "provider": "pexels", "results": results}
+        if results:
+            return {"configured": True, "provider": "pexels", "results": results, "fallbackReason": "; ".join(provider_errors) or None}
+        fallback = search_commons_images(clean_query, per_page)
+        fallback["fallbackReason"] = "; ".join(provider_errors) or "Pexels eşleşme bulamadı"
+        return fallback
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Stok servisine ulaşılamadı: {exc}") from exc
+        fallback = search_commons_images(clean_query, per_page)
+        fallback["fallbackReason"] = f"Video sağlayıcısı kullanılamadı: {exc}"
+        return fallback
 
 
 STOCK_TERM_TRANSLATIONS = {
@@ -2002,6 +2040,73 @@ def search_coverr_videos(query: str, orientation: str, per_page: int = 12) -> di
         raise ValueError(f"Coverr stok servisine ulaşılamadı: HTTP {exc.code}") from exc
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise ValueError(f"Coverr stok servisine ulaşılamadı: {exc}") from exc
+
+
+def search_pixabay_videos(query: str, orientation: str, per_page: int = 12) -> dict:
+    """Search Pixabay's licensed video catalogue with the required 24-hour cache."""
+    limit = max(3, min(40, per_page * 3))
+    cache_key = (" ".join(query.casefold().split()), orientation, limit)
+    with PIXABAY_CACHE_LOCK:
+        cached = PIXABAY_SEARCH_CACHE.get(cache_key)
+        if cached and time.monotonic() - cached[0] < PIXABAY_CACHE_TTL_SECONDS:
+            return json.loads(json.dumps(cached[1]))
+    provider_query = coverr_query_text(query)
+    minimums = {"vertical": (720, 1280), "horizontal": (1280, 720), "square": (720, 720)}
+    min_width, min_height = minimums.get(orientation, minimums["horizontal"])
+    params = urlencode({
+        "key": PIXABAY_API_KEY, "q": provider_query, "video_type": "film",
+        "safesearch": "true", "order": "popular", "per_page": limit,
+        "min_width": min_width, "min_height": min_height,
+    })
+    request = Request(f"https://pixabay.com/api/videos/?{params}", headers={"User-Agent": "Videoluk/0.3"})
+    try:
+        with urlopen(request, timeout=25) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        results = []
+        for video in data.get("hits", []):
+            variants = video.get("videos") or {}
+            media = variants.get("large") or variants.get("medium") or variants.get("small") or {}
+            preview = variants.get("small") or variants.get("tiny") or media
+            width, height = int(media.get("width") or 0), int(media.get("height") or 0)
+            if not media.get("url") or not width or not height:
+                continue
+            if orientation == "vertical" and width >= height:
+                continue
+            if orientation == "horizontal" and width <= height:
+                continue
+            if orientation == "square" and abs(width - height) / max(width, height) > 0.25:
+                continue
+            tags = [tag.strip() for tag in str(video.get("tags") or "").split(",") if tag.strip()]
+            semantic, matched_terms = coverr_semantic_match(provider_query, {"title": " ".join(tags), "tags": tags})
+            if semantic < 0.34:
+                continue
+            views, likes = max(1, int(video.get("views") or 0)), int(video.get("likes") or 0)
+            quality = min(1.0, math.log10(views + 10) / 7 + min(0.25, likes / views * 4))
+            results.append({
+                "id": f"pixabay-{video.get('id')}", "provider": "pixabay", "mediaType": "video",
+                "title": tags[0].title() if tags else "Pixabay video", "description": ", ".join(tags),
+                "tags": tags, "thumbnail": preview.get("thumbnail") or media.get("thumbnail"),
+                "videoUrl": media.get("url"), "previewUrl": preview.get("url"),
+                "duration": float(video.get("duration") or 0), "width": width, "height": height,
+                "creator": video.get("user") or "Pixabay üreticisi",
+                "creatorUrl": f"https://pixabay.com/users/{video.get('user')}-{video.get('user_id')}/",
+                "sourceUrl": video.get("pageURL"), "license": "Pixabay Content License",
+                "technicalScore": round(min(1.0, max(width, height) / 1920), 3),
+                "semanticScore": round(semantic, 3), "qualityScore": round(quality, 3),
+                "matchedTerms": sorted(matched_terms),
+            })
+        results.sort(key=lambda item: (item["semanticScore"], item["technicalScore"], item["qualityScore"]), reverse=True)
+        result = {"configured": True, "provider": "pixabay", "queryUsed": provider_query, "results": results}
+        with PIXABAY_CACHE_LOCK:
+            if len(PIXABAY_SEARCH_CACHE) >= 200:
+                oldest = min(PIXABAY_SEARCH_CACHE, key=lambda key: PIXABAY_SEARCH_CACHE[key][0])
+                PIXABAY_SEARCH_CACHE.pop(oldest, None)
+            PIXABAY_SEARCH_CACHE[cache_key] = (time.monotonic(), result)
+        return result
+    except HTTPError as exc:
+        raise ValueError(f"Pixabay stok servisine ulaşılamadı: HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Pixabay stok servisine ulaşılamadı: {exc}") from exc
 
 
 def search_commons_images(query: str, per_page: int = 8) -> dict:
@@ -2196,12 +2301,41 @@ def validate_stock_url(url: str) -> str:
     allowed = (
         hostname == "pexels.com" or hostname.endswith(".pexels.com")
         or hostname == "coverr.co" or hostname.endswith(".coverr.co")
+        or hostname == "pixabay.com" or hostname.endswith(".pixabay.com")
         or hostname == "vimeo.com" or hostname.endswith(".vimeo.com")
         or hostname == "wikimedia.org" or hostname.endswith(".wikimedia.org")
     )
     if parsed.scheme != "https" or not allowed:
         raise ValueError("Stok medya adresine izin verilmiyor")
     return url
+
+
+def proxy_stock_media(handler: SimpleHTTPRequestHandler, source_url: str) -> None:
+    validated = validate_stock_url(source_url)
+    headers = {"User-Agent": "Videoluk/0.3 (timeline preview)"}
+    requested_range = handler.headers.get("Range")
+    if requested_range and re.fullmatch(r"bytes=\d*-\d*", requested_range):
+        headers["Range"] = requested_range
+    request = Request(validated, headers=headers)
+    try:
+        with urlopen(request, timeout=30) as response:
+            validate_stock_url(response.geturl())
+            length = int(response.headers.get("Content-Length") or 0)
+            if length > MAX_MEDIA_BYTES:
+                raise ValueError("Stok önizleme dosyası boyut sınırını aşıyor")
+            status = HTTPStatus.PARTIAL_CONTENT if getattr(response, "status", 200) == 206 else HTTPStatus.OK
+            handler.send_response(status)
+            handler.send_header("Content-Type", response.headers.get("Content-Type") or "video/mp4")
+            for name in ("Content-Length", "Content-Range", "Accept-Ranges"):
+                value = response.headers.get(name)
+                if value:
+                    handler.send_header(name, value)
+            handler.send_header("Cache-Control", "private, max-age=3600")
+            handler.send_header("X-Content-Type-Options", "nosniff")
+            handler.end_headers()
+            shutil.copyfileobj(response, handler.wfile, length=256 * 1024)
+    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        raise ValueError(f"Stok medya önizlemesi alınamadı: {exc}") from exc
 
 
 UPLOAD_EXTENSIONS = {
@@ -3131,7 +3265,7 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 "model": LLM_MODEL or None,
                 "imageEngine": "ai" if IMAGE_URL and IMAGE_MODEL else "stock-fallback",
                 "imageModel": IMAGE_MODEL or None,
-                "stockProvider": "coverr" if COVERR_API_KEY else "pexels" if PEXELS_API_KEY else None,
+                "stockProvider": "+".join(name for name, key in (("coverr", COVERR_API_KEY), ("pixabay", PIXABAY_API_KEY), ("pexels", PEXELS_API_KEY)) if key) or None,
                 "voiceEngine": "system-tts" if voice_engine_ready() else None,
                 "authRequired": AUTH_REQUIRED,
                 "authReady": bool(not AUTH_REQUIRED or (ADMIN_EMAIL and ADMIN_PASSWORD)),
@@ -3159,6 +3293,13 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
         if route.startswith("/api/") and not self.require_user():
+            return
+        if route == "/api/media/preview":
+            source_url = parse_qs(urlparse(self.path).query).get("url", [""])[0]
+            try:
+                proxy_stock_media(self, source_url)
+            except ValueError as exc:
+                self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
             return
         if route == "/api/admin/overview":
             if not self.require_owner():

@@ -7,6 +7,51 @@ import server
 
 
 class VideolukCoreTests(unittest.TestCase):
+    def test_stock_search_falls_back_when_coverr_is_unavailable(self):
+        originals = {
+            "COVERR_API_KEY": server.COVERR_API_KEY, "PIXABAY_API_KEY": server.PIXABAY_API_KEY, "PEXELS_API_KEY": server.PEXELS_API_KEY,
+            "coverr": server.search_coverr_videos, "commons": server.search_commons_images,
+        }
+        try:
+            server.COVERR_API_KEY = "configured"; server.PIXABAY_API_KEY = ""; server.PEXELS_API_KEY = ""
+            server.search_coverr_videos = lambda *_args: (_ for _ in ()).throw(ValueError("Coverr kota dolu"))
+            server.search_commons_images = lambda query, per_page: {"configured": True, "provider": "wikimedia", "results": [{"id": "fallback"}]}
+            result = server.search_stock_videos("ferry", "horizontal", 8)
+            self.assertEqual("wikimedia", result["provider"])
+            self.assertEqual("fallback", result["results"][0]["id"])
+            self.assertIn("kota", result["fallbackReason"])
+        finally:
+            server.COVERR_API_KEY = originals["COVERR_API_KEY"]
+            server.PIXABAY_API_KEY = originals["PIXABAY_API_KEY"]
+            server.PEXELS_API_KEY = originals["PEXELS_API_KEY"]
+            server.search_coverr_videos = originals["coverr"]
+            server.search_commons_images = originals["commons"]
+
+    def test_stock_search_merges_and_ranks_coverr_and_pixabay(self):
+        originals = {
+            "COVERR_API_KEY": server.COVERR_API_KEY, "PIXABAY_API_KEY": server.PIXABAY_API_KEY,
+            "PEXELS_API_KEY": server.PEXELS_API_KEY, "coverr": server.search_coverr_videos,
+            "pixabay": server.search_pixabay_videos,
+        }
+        try:
+            server.COVERR_API_KEY = "coverr"; server.PIXABAY_API_KEY = "pixabay"; server.PEXELS_API_KEY = ""
+            server.search_coverr_videos = lambda *_args: {"results": [
+                {"id": "coverr-1", "provider": "coverr", "semanticScore": .7, "technicalScore": 1, "qualityScore": .4}
+            ]}
+            server.search_pixabay_videos = lambda *_args: {"results": [
+                {"id": "pixabay-1", "provider": "pixabay", "semanticScore": .9, "technicalScore": .8, "qualityScore": .8}
+            ]}
+            result = server.search_stock_videos("ferry", "horizontal", 8)
+            self.assertEqual("multi", result["provider"])
+            self.assertEqual(["coverr", "pixabay"], result["providers"])
+            self.assertEqual("pixabay-1", result["results"][0]["id"])
+        finally:
+            server.COVERR_API_KEY = originals["COVERR_API_KEY"]
+            server.PIXABAY_API_KEY = originals["PIXABAY_API_KEY"]
+            server.PEXELS_API_KEY = originals["PEXELS_API_KEY"]
+            server.search_coverr_videos = originals["coverr"]
+            server.search_pixabay_videos = originals["pixabay"]
+
     def test_responses_api_text_and_script_schema_are_parsed_safely(self):
         response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "{\"script\":\"Metin\"}"}]}]}
         self.assertEqual('{"script":"Metin"}', server.response_output_text(response))

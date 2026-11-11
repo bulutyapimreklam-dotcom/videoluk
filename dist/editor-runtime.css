@@ -1,0 +1,24 @@
+.video-canvas #sceneVideo,
+.video-canvas #sceneImage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: none;
+  background: #071b18;
+}
+.video-canvas #sceneImage.visible,
+.video-canvas #sceneVideo.visible { display: block; }
+.video-canvas.has-scene-media .orb,
+.video-canvas.has-scene-media .canvas-copy { display: none; }
+.video-canvas .caption-preview { z-index: 4; }
+.video-canvas .play-overlay { z-index: 5; }
+.canvas-controls .scrub { cursor: pointer; position: relative; }
+.canvas-controls .scrub i { width: 0; transition: width .1s linear; }
+.timeline .clips { overflow-x: auto; scrollbar-width: thin; }
+.timeline .clips .clip { background-size: cover; background-position: center; position: relative; isolation: isolate; }
+.timeline .clips .clip::before { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg,#102a25cc,#102a2566); z-index: -1; border-radius: 4px; }
+.timeline .clip.failed { background: #7d3d35; }
+.timeline .clip.loading { animation: clipPulse 1s ease-in-out infinite alternate; }
+@keyframes clipPulse { to { opacity: .55; } }
