@@ -14,6 +14,20 @@ class VideolukCoreTests(unittest.TestCase):
         self.assertEqual(6, schema["properties"]["scenes"]["minItems"])
         self.assertEqual(6, schema["properties"]["scenes"]["maxItems"])
         self.assertIn("mediaQuery", schema["properties"]["scenes"]["items"]["required"])
+        self.assertIn("narration", schema["properties"]["scenes"]["items"]["required"])
+
+    def test_voiceover_is_built_only_from_narration_and_rejects_stage_directions(self):
+        generated = {"scenes": [
+            {"title": "Editoryal başlık", "narration": "Bu cümle doğrudan izleyiciye okunur.", "purpose": "Kanca", "editingReason": "Hızlı giriş", "mediaQuery": "city morning"},
+            {"title": "Görsel karar", "narration": "İkinci bilgi anlatıyı doğal biçimde ilerletir.", "purpose": "Kapanış", "editingReason": "Sakin kapanış", "mediaQuery": "people walking"},
+        ]}
+        script, scenes = server.normalize_generated_narration(generated, 2)
+        self.assertNotIn("Editoryal başlık", script)
+        self.assertEqual("Bu cümle doğrudan izleyiciye okunur.\n\nİkinci bilgi anlatıyı doğal biçimde ilerletir.", script)
+        self.assertEqual("Görsel karar", scenes[1]["title"])
+        generated["scenes"][0]["narration"] = "Bu sahnede kamera yaklaşır ve ekranda bir şehir görülür."
+        with self.assertRaisesRegex(ValueError, "sahne veya kamera"):
+            server.normalize_generated_narration(generated, 2)
 
     def test_coverr_semantic_match_rejects_popular_but_unrelated_media(self):
         relevant, terms = server.coverr_semantic_match(

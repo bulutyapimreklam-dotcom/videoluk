@@ -134,6 +134,8 @@ VIDEOLUK_LLM_MODEL=gpt-6.1-terra
 
 Anahtar yalnızca sunucunun ortam değişkeninde tutulur ve tarayıcıya gönderilmez. GPT; fikirden sapmama, dolgu cümlelerinden kaçınma, süreye göre kelime hedefi, sahne başına yeni bilgi ve somut stok sorgusu kurallarıyla yönlendirilir. Uzak model ayarlanmamışsa veya erişilemiyorsa Videoluk yerel, ücretsiz taslak motoruna otomatik döner. `VIDEOLUK_LLM_URL` ve `VIDEOLUK_LLM_API_KEY` ile Ollama ve diğer OpenAI-uyumlu servisler de kullanılabilir.
 
+Seslendirme ve görsel plan birbirinden kesin olarak ayrılır. `narration` yalnızca izleyicinin duyacağı metindir; editoryal başlık, kamera/görüntü yönergesi, stok sorgusu ve kurgu gerekçesi ayrı sahne alanlarında tutulur. Sunucu yasak yönetmen ifadelerini denetler ve gerekirse modeli otomatik olarak yeniden çalıştırır.
+
 Biyografi ve “kimdir?” türündeki bilgi isteyen içeriklerde, harici dil modeli bağlı değilse Türkçe Wikipedia özeti kaynak olarak kullanılır. Böylece aynı genel cümlenin tekrarlandığı şablon yerine doğrulanabilir bilgi sahnelere ayrılır.
 
 ## Stok video ve seslendirme

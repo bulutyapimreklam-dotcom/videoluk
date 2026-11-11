@@ -1696,22 +1696,60 @@ def videoluk_script_schema(scene_count: int) -> dict:
     return {
         "type": "object", "additionalProperties": False,
         "properties": {
-            "script": {"type": "string"},
             "scenes": {
                 "type": "array", "minItems": scene_count, "maxItems": scene_count,
                 "items": {
                     "type": "object", "additionalProperties": False,
                     "properties": {
-                        "title": {"type": "string"}, "subtitle": {"type": "string"},
+                        "title": {"type": "string"}, "narration": {"type": "string"},
                         "purpose": {"type": "string", "enum": ["Kanca", "Ana fikir", "Kapanış"]},
                         "editingReason": {"type": "string"}, "mediaQuery": {"type": "string"},
                     },
-                    "required": ["title", "subtitle", "purpose", "editingReason", "mediaQuery"],
+                    "required": ["title", "narration", "purpose", "editingReason", "mediaQuery"],
                 },
             },
         },
-        "required": ["script", "scenes"],
+        "required": ["scenes"],
     }
+
+
+NARRATION_DIRECTION_PATTERNS = (
+    r"\bbu sahnede\b", r"\bşu sahnede\b", r"\bekranda (?:görülür|görürüz|belirir)\b",
+    r"\bgörüntüde (?:görülür|görürüz|belirir)\b", r"\bkamera (?:yaklaşır|uzaklaşır|döner|takip eder)\b",
+    r"\b(?:yakın|geniş|orta) plan(?:da)?\b", r"\bstok görüntü(?:de|ler)?\b",
+    r"\bb[- ]?roll\b", r"\bsahne geçişi\b", r"\bses efekti\b",
+)
+
+
+def narration_direction_violations(text: str) -> list[str]:
+    folded = " ".join(str(text or "").casefold().split())
+    return [pattern for pattern in NARRATION_DIRECTION_PATTERNS if re.search(pattern, folded)]
+
+
+def normalize_generated_narration(generated: dict, scene_count: int) -> tuple[str, list[dict]]:
+    scenes = generated.get("scenes")
+    if not isinstance(scenes, list) or len(scenes) != scene_count:
+        raise ValueError("Model istenen sayıda sahne döndürmedi")
+    normalized = []
+    for index, scene in enumerate(scenes):
+        if not isinstance(scene, dict):
+            raise ValueError("Model geçersiz sahne döndürdü")
+        narration = " ".join(str(scene.get("narration") or scene.get("subtitle") or "").split())[:700]
+        if len(narration) < 10:
+            raise ValueError("Sahne seslendirmesi eksik")
+        if narration_direction_violations(narration):
+            raise ValueError("Seslendirme metnine sahne veya kamera yönergesi karıştı")
+        title = " ".join(str(scene.get("title") or f"Sahne {index + 1}").split())[:180]
+        normalized.append({
+            "title": title, "subtitle": narration,
+            "purpose": str(scene.get("purpose") or ("Kapanış" if index == len(scenes) - 1 else "Ana fikir"))[:40],
+            "editingReason": " ".join(str(scene.get("editingReason") or "Kurgu DNA akışına uygun sahne").split())[:300],
+            "mediaQuery": " ".join(str(scene.get("mediaQuery") or title).split())[:180],
+        })
+    # The editable script is built only from spoken narration. Editorial titles,
+    # stock prompts and camera notes can therefore never leak into text-to-speech.
+    script = "\n\n".join(scene["subtitle"] for scene in normalized)
+    return script, normalized
 
 
 def extract_json(text: str) -> dict:
@@ -1745,7 +1783,10 @@ def generate_ai_script(payload: dict) -> dict:
         "yerleşik ve genel kabul gören bilgilerle açık bir anlatı kur. Tanıtım isteklerinde yalnızca kullanıcı tarafından verilen "
         "özellikleri kullan. İlk cümlede merak uyandır, her sahnede yeni bilgi veya anlatı ilerlemesi sağla, tekrar etme. "
         "Klişe ifadelerden, 'hazır mısın', 'birlikte bakalım', 'gelecek şimdi başlıyor' gibi dolgu cümlelerinden kaçın. "
-        "Metin doğal Türkçe seslendirmeye uygun olsun. Sahne altyazıları birleştiğinde script ile aynı anlatıyı oluştursun. "
+        "Çıktıdaki narration alanları SADECE izleyicinin duyacağı doğal Türkçe seslendirmedir. Narration içine sahneyi, görüntüyü, "
+        "kamerayı, planı, müziği, geçişi veya ekranda ne görüldüğünü anlatan hiçbir yönetmen yönergesi yazma. "
+        "'Bu sahnede', 'ekranda görülür', 'kamera yaklaşır', 'yakın plan' gibi ifadeler narration içinde kesinlikle yasaktır. "
+        "Görsel kararları yalnızca title, editingReason ve mediaQuery alanlarında tut. "
         "Her sahne için Coverr stok aramasında kullanılabilecek 2-5 kelimelik, somut ve İngilizce mediaQuery yaz. "
         "Kurgu yönetmeninin kurallarını zorunlu yapım şartı olarak uygula."
     )
@@ -1778,41 +1819,36 @@ def generate_ai_script(payload: dict) -> dict:
     headers = {"Content-Type": "application/json"}
     if LLM_API_KEY:
         headers["Authorization"] = f"Bearer {LLM_API_KEY}"
-    request = Request(
-        llm_endpoint(),
-        data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
     try:
-        with urlopen(request, timeout=LLM_TIMEOUT) as response:
-            provider_response = json.loads(response.read().decode("utf-8"))
-        content = response_output_text(provider_response)
-        generated = extract_json(content)
-        scenes = generated.get("scenes")
-        script = str(generated.get("script") or "").strip()
-        if not isinstance(scenes, list) or len(scenes) < 2 or not script:
-            raise ValueError("Model yanıtında senaryo veya sahne bulunamadı")
-        normalized_scenes = []
-        for index, scene in enumerate(scenes[:6]):
-            if not isinstance(scene, dict):
-                continue
-            title = str(scene.get("title") or f"Sahne {index + 1}").strip()[:180]
-            subtitle = str(scene.get("subtitle") or "").strip()[:500]
-            purpose = str(scene.get("purpose") or ("Kapanış" if index == len(scenes) - 1 else "Ana fikir"))[:40]
-            normalized_scenes.append({
-                "title": title,
-                "subtitle": subtitle,
-                "purpose": purpose,
-                "editingReason": str(scene.get("editingReason") or "Kurgu DNA akışına uygun sahne")[:300],
-                "mediaQuery": " ".join(str(scene.get("mediaQuery") or title).split())[:180],
-            })
-        if len(normalized_scenes) < 2:
-            raise ValueError("Model yeterli sahne oluşturmadı")
+        last_error = None
+        for attempt in range(2):
+            attempt_body = json.loads(json.dumps(request_body))
+            if attempt:
+                correction = (
+                    "\nÖNCEKİ ÇIKTI REDDEDİLDİ: Seslendirme alanına sahne/kamera/görüntü yönergesi karıştırma. "
+                    "Narration yalnızca izleyiciye okunacak metin olsun; tüm görsel kararlarını diğer alanlarda tut."
+                )
+                if responses_api:
+                    attempt_body["input"] += correction
+                else:
+                    attempt_body["messages"][-1]["content"] += correction
+            request = Request(
+                llm_endpoint(), data=json.dumps(attempt_body, ensure_ascii=False).encode("utf-8"),
+                headers=headers, method="POST",
+            )
+            with urlopen(request, timeout=LLM_TIMEOUT) as response:
+                provider_response = json.loads(response.read().decode("utf-8"))
+            generated = extract_json(response_output_text(provider_response))
+            try:
+                script, normalized_scenes = normalize_generated_narration(generated, scene_count)
+                break
+            except ValueError as exc:
+                last_error = exc
+        else:
+            raise last_error or ValueError("Seslendirme metni doğrulanamadı")
         result = {
             "idea": idea,
             "type": video_type,
-            "tone": tone,
             "duration": duration,
             "script": script[:4000],
             "scenes": normalized_scenes,
