@@ -103,6 +103,7 @@ VISUAL_DIRECTOR_CACHE: dict[str, tuple[float, dict]] = {}
 VISUAL_DIRECTOR_CACHE_LOCK = threading.Lock()
 VISUAL_DIRECTOR_CACHE_TTL_SECONDS = 86400
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
+MAX_DIRECTOR_PREVIEW_BYTES = int(os.getenv("VIDEOLUK_MAX_DIRECTOR_PREVIEW_BYTES", str(30 * 1024 * 1024)))
 MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
 MAX_UPLOAD_BYTES = int(os.getenv("VIDEOLUK_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
 MAX_PROJECTS_PER_USER = max(1, int(os.getenv("VIDEOLUK_MAX_PROJECTS_PER_USER", "50")))
@@ -1947,13 +1948,74 @@ def visual_director_schema(candidate_count: int) -> dict:
     }
 
 
+def visual_director_frames(media: dict) -> list[str]:
+    """Return cached low-resolution start/middle/end frames as data URLs."""
+    source_url = str(media.get("previewUrl") or media.get("videoUrl") or "")
+    if not source_url:
+        return []
+    validate_stock_url(source_url)
+    identity = str(media.get("id") or source_url)
+    cache_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    frame_dir = MEDIA_CACHE / "visual-director" / cache_key
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    video_path = frame_dir / "preview.mp4"
+    if not video_path.exists():
+        temporary = frame_dir / "preview.part"
+        request = Request(source_url, headers={"User-Agent": "Videoluk/0.4 (visual director)"})
+        try:
+            with urlopen(request, timeout=30) as response, temporary.open("wb") as output:
+                validate_stock_url(response.geturl())
+                declared = int(response.headers.get("Content-Length") or 0)
+                if declared > MAX_DIRECTOR_PREVIEW_BYTES:
+                    return []
+                total = 0
+                while True:
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_DIRECTOR_PREVIEW_BYTES:
+                        return []
+                    output.write(chunk)
+            temporary.replace(video_path)
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+            return []
+        finally:
+            temporary.unlink(missing_ok=True)
+    duration = float(media.get("duration") or 0)
+    if duration <= 0:
+        probe = subprocess.run(
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(video_path)],
+            capture_output=True, text=True, timeout=20,
+        )
+        try:
+            duration = float(probe.stdout.strip())
+        except ValueError:
+            duration = 3.0
+    timestamps = [max(0.0, duration * ratio) for ratio in (0.12, 0.5, 0.88)]
+    frames = []
+    for index, timestamp in enumerate(timestamps):
+        frame_path = frame_dir / f"frame-{index}.jpg"
+        if not frame_path.exists():
+            result = subprocess.run([
+                FFMPEG, "-y", "-ss", f"{timestamp:.3f}", "-i", str(video_path),
+                "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "4", str(frame_path),
+            ], capture_output=True, timeout=30)
+            if result.returncode != 0:
+                frame_path.unlink(missing_ok=True)
+                continue
+        encoded = base64.b64encode(frame_path.read_bytes()).decode("ascii")
+        frames.append(f"data:image/jpeg;base64,{encoded}")
+    return frames
+
+
 def direct_visual_selection(payload: dict) -> dict:
     """Use low-detail contact-sheet inspection to reject tag-correct but visually wrong media."""
     if not (LLM_URL and LLM_MODEL and llm_endpoint().endswith("/responses")):
         return {"configured": False, "approved": False, "selectedIndex": -1, "reason": "Görsel model bağlı değil"}
     scene = payload.get("scene") if isinstance(payload.get("scene"), dict) else {}
     candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
-    candidates = [item for item in candidates[:8] if isinstance(item, dict)]
+    candidates = [item for item in candidates[:4] if isinstance(item, dict)]
     if not candidates:
         raise ValueError("Görsel yönetmen için aday medya yok")
     normalized = []
@@ -1963,7 +2025,8 @@ def direct_visual_selection(payload: dict) -> dict:
             validate_stock_url(thumbnail)
         except ValueError:
             continue
-        normalized.append((index, item, thumbnail))
+        frames = visual_director_frames(item)
+        normalized.append((index, item, thumbnail, frames))
     if not normalized:
         raise ValueError("Görsel yönetmenin inceleyebileceği güvenli önizleme yok")
     previous = payload.get("previousMedia") if isinstance(payload.get("previousMedia"), dict) else None
@@ -1974,8 +2037,9 @@ def direct_visual_selection(payload: dict) -> dict:
     except ValueError:
         previous_thumbnail = ""
     cache_material = json.dumps({
+        "analysisVersion": 2,
         "scene": {"subtitle": scene.get("subtitle") or scene.get("sub"), "mediaQuery": scene.get("mediaQuery")},
-        "candidateIds": [item.get("id") or thumbnail for _, item, thumbnail in normalized],
+        "candidateIds": [item.get("id") or thumbnail for _, item, thumbnail, _frames in normalized],
         "previous": (previous or {}).get("id") or previous_thumbnail,
     }, ensure_ascii=False, sort_keys=True)
     cache_key = hashlib.sha256(cache_material.encode("utf-8")).hexdigest()
@@ -1987,6 +2051,7 @@ def direct_visual_selection(payload: dict) -> dict:
         "Videoluk için kıdemli görsel yönetmensin. Seslendirme: "
         f"{scene.get('subtitle') or scene.get('sub') or ''}\nAranan görüntü: {scene.get('mediaQuery') or ''}. "
         "Adayları gerçekten görünen içeriğe göre değerlendir; dosya adı ve etiket tek başına kanıt değildir. "
+        "Her adayın başlangıç, orta ve son karelerini birlikte okuyarak videodaki hareketi ve eylemi değerlendir. "
         "Özne, eylem, mekân ve duygu cümleyle uyuşmalı. Önceki plan verilmişse ışık, mekân, renk, yön ve anlatı "
         "sürekliliğini de değerlendir. Bağlamdan kopuksa hiçbir adayı seçme. Onay için relevance en az 0.72 olmalı."
     )
@@ -1996,11 +2061,10 @@ def direct_visual_selection(payload: dict) -> dict:
             {"type": "input_text", "text": "ÖNCEKİ PLAN REFERANSI:"},
             {"type": "input_image", "image_url": previous_thumbnail, "detail": "low"},
         ])
-    for normalized_index, (_original_index, item, thumbnail) in enumerate(normalized):
-        content.extend([
-            {"type": "input_text", "text": f"ADAY {normalized_index}: {item.get('title') or 'Başlıksız'}"},
-            {"type": "input_image", "image_url": thumbnail, "detail": "low"},
-        ])
+    for normalized_index, (_original_index, item, thumbnail, frames) in enumerate(normalized):
+        content.append({"type": "input_text", "text": f"ADAY {normalized_index}: {item.get('title') or 'Başlıksız'} — başlangıç/orta/son kareleri:"})
+        candidate_frames = frames or [thumbnail]
+        content.extend({"type": "input_image", "image_url": frame, "detail": "low"} for frame in candidate_frames)
     body = {
         "model": LLM_MODEL,
         "input": [{"role": "user", "content": content}],
