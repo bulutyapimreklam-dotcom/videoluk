@@ -99,6 +99,9 @@ COVERR_CACHE_TTL_SECONDS = 3600
 PIXABAY_SEARCH_CACHE: dict[tuple[str, str, int], tuple[float, dict]] = {}
 PIXABAY_CACHE_LOCK = threading.Lock()
 PIXABAY_CACHE_TTL_SECONDS = 86400
+VISUAL_DIRECTOR_CACHE: dict[str, tuple[float, dict]] = {}
+VISUAL_DIRECTOR_CACHE_LOCK = threading.Lock()
+VISUAL_DIRECTOR_CACHE_TTL_SECONDS = 86400
 MAX_MEDIA_BYTES = int(os.getenv("VIDEOLUK_MAX_MEDIA_BYTES", str(200 * 1024 * 1024)))
 MAX_TRAINING_VIDEO_BYTES = int(os.getenv("VIDEOLUK_MAX_TRAINING_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
 MAX_UPLOAD_BYTES = int(os.getenv("VIDEOLUK_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
@@ -1927,6 +1930,105 @@ def search_stock_videos(query: str, orientation: str, per_page: int = 8) -> dict
         if provider_errors:
             fallback["fallbackReason"] = "; ".join(provider_errors)
         return fallback
+    return search_pexels_videos(clean_query, orientation, per_page, provider_errors)
+
+
+def visual_director_schema(candidate_count: int) -> dict:
+    return {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "approved": {"type": "boolean"},
+            "selectedIndex": {"type": "integer", "minimum": -1, "maximum": candidate_count - 1},
+            "relevance": {"type": "number", "minimum": 0, "maximum": 1},
+            "continuity": {"type": "number", "minimum": 0, "maximum": 1},
+            "reason": {"type": "string", "maxLength": 300},
+        },
+        "required": ["approved", "selectedIndex", "relevance", "continuity", "reason"],
+    }
+
+
+def direct_visual_selection(payload: dict) -> dict:
+    """Use low-detail contact-sheet inspection to reject tag-correct but visually wrong media."""
+    if not (LLM_URL and LLM_MODEL and llm_endpoint().endswith("/responses")):
+        return {"configured": False, "approved": False, "selectedIndex": -1, "reason": "Görsel model bağlı değil"}
+    scene = payload.get("scene") if isinstance(payload.get("scene"), dict) else {}
+    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    candidates = [item for item in candidates[:8] if isinstance(item, dict)]
+    if not candidates:
+        raise ValueError("Görsel yönetmen için aday medya yok")
+    normalized = []
+    for index, item in enumerate(candidates):
+        thumbnail = str(item.get("thumbnail") or "")
+        try:
+            validate_stock_url(thumbnail)
+        except ValueError:
+            continue
+        normalized.append((index, item, thumbnail))
+    if not normalized:
+        raise ValueError("Görsel yönetmenin inceleyebileceği güvenli önizleme yok")
+    previous = payload.get("previousMedia") if isinstance(payload.get("previousMedia"), dict) else None
+    previous_thumbnail = str((previous or {}).get("thumbnail") or "")
+    try:
+        if previous_thumbnail:
+            validate_stock_url(previous_thumbnail)
+    except ValueError:
+        previous_thumbnail = ""
+    cache_material = json.dumps({
+        "scene": {"subtitle": scene.get("subtitle") or scene.get("sub"), "mediaQuery": scene.get("mediaQuery")},
+        "candidateIds": [item.get("id") or thumbnail for _, item, thumbnail in normalized],
+        "previous": (previous or {}).get("id") or previous_thumbnail,
+    }, ensure_ascii=False, sort_keys=True)
+    cache_key = hashlib.sha256(cache_material.encode("utf-8")).hexdigest()
+    with VISUAL_DIRECTOR_CACHE_LOCK:
+        cached = VISUAL_DIRECTOR_CACHE.get(cache_key)
+        if cached and time.monotonic() - cached[0] < VISUAL_DIRECTOR_CACHE_TTL_SECONDS:
+            return json.loads(json.dumps(cached[1]))
+    prompt = (
+        "Videoluk için kıdemli görsel yönetmensin. Seslendirme: "
+        f"{scene.get('subtitle') or scene.get('sub') or ''}\nAranan görüntü: {scene.get('mediaQuery') or ''}. "
+        "Adayları gerçekten görünen içeriğe göre değerlendir; dosya adı ve etiket tek başına kanıt değildir. "
+        "Özne, eylem, mekân ve duygu cümleyle uyuşmalı. Önceki plan verilmişse ışık, mekân, renk, yön ve anlatı "
+        "sürekliliğini de değerlendir. Bağlamdan kopuksa hiçbir adayı seçme. Onay için relevance en az 0.72 olmalı."
+    )
+    content = [{"type": "input_text", "text": prompt}]
+    if previous_thumbnail:
+        content.extend([
+            {"type": "input_text", "text": "ÖNCEKİ PLAN REFERANSI:"},
+            {"type": "input_image", "image_url": previous_thumbnail, "detail": "low"},
+        ])
+    for normalized_index, (_original_index, item, thumbnail) in enumerate(normalized):
+        content.extend([
+            {"type": "input_text", "text": f"ADAY {normalized_index}: {item.get('title') or 'Başlıksız'}"},
+            {"type": "input_image", "image_url": thumbnail, "detail": "low"},
+        ])
+    body = {
+        "model": LLM_MODEL,
+        "input": [{"role": "user", "content": content}],
+        "reasoning": {"effort": "low"}, "max_output_tokens": 600,
+        "text": {"verbosity": "low", "format": {
+            "type": "json_schema", "name": "visual_director_selection", "strict": True,
+            "schema": visual_director_schema(len(normalized)),
+        }},
+    }
+    headers = {"Content-Type": "application/json"}
+    if LLM_API_KEY:
+        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+    try:
+        request = Request(llm_endpoint(), data=json.dumps(body, ensure_ascii=False).encode("utf-8"), headers=headers, method="POST")
+        with urlopen(request, timeout=LLM_TIMEOUT) as response:
+            selection = extract_json(response_output_text(json.loads(response.read().decode("utf-8"))))
+        selected_normalized = int(selection.get("selectedIndex", -1))
+        approved = bool(selection.get("approved")) and float(selection.get("relevance") or 0) >= 0.72
+        original_index = normalized[selected_normalized][0] if approved and 0 <= selected_normalized < len(normalized) else -1
+        result = {**selection, "configured": True, "approved": approved, "selectedIndex": original_index}
+        with VISUAL_DIRECTOR_CACHE_LOCK:
+            VISUAL_DIRECTOR_CACHE[cache_key] = (time.monotonic(), result)
+        return result
+    except (HTTPError, URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"Görsel yönetmen değerlendirmesi yapılamadı: {exc}") from exc
+
+
+def search_pexels_videos(clean_query: str, orientation: str, per_page: int, provider_errors: list[str]) -> dict:
     orientation_map = {"vertical": "portrait", "horizontal": "landscape", "square": "square"}
     params = urlencode({
         "query": clean_query,
@@ -3119,6 +3221,9 @@ class VideolukHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, build_semantic_shot_plan(
                     str(body.get("script") or ""), int(body.get("duration") or 30)
                 ))
+                return
+            if route == "/api/media/director":
+                self.send_json(HTTPStatus.OK, direct_visual_selection(body))
                 return
             if route == "/api/editing-profiles":
                 profile_id = str(body.get("id") or uuid.uuid4())

@@ -60,6 +60,10 @@ class VideolukCoreTests(unittest.TestCase):
         self.assertEqual(6, schema["properties"]["scenes"]["maxItems"])
         self.assertIn("mediaQuery", schema["properties"]["scenes"]["items"]["required"])
         self.assertIn("narration", schema["properties"]["scenes"]["items"]["required"])
+        director = server.visual_director_schema(6)
+        self.assertEqual(5, director["properties"]["selectedIndex"]["maximum"])
+        self.assertEqual(-1, director["properties"]["selectedIndex"]["minimum"])
+        self.assertIn("continuity", director["required"])
 
     def test_learned_shot_rhythm_controls_storyboard_density(self):
         profile = {"rules": {"averageShotSeconds": 2.19}}
