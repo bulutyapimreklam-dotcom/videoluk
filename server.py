@@ -1521,6 +1521,14 @@ def editing_brief(profile: dict | None) -> str:
     )
 
 
+def editing_scene_count(duration: int, profile: dict | None) -> int:
+    """Turn the learned shot rhythm into an actionable storyboard density."""
+    if not profile:
+        return max(3, min(8, round(duration / 10)))
+    average_shot = float((profile.get("rules") or {}).get("averageShotSeconds") or 3.5)
+    return max(3, min(14, round(duration / max(0.8, average_shot))))
+
+
 def apply_editing_profile(result: dict, profile: dict | None) -> dict:
     if not profile:
         return result
@@ -1778,7 +1786,7 @@ def generate_ai_script(payload: dict) -> dict:
             except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError):
                 pass
         return generate_local_script(payload)
-    scene_count = max(3, min(8, round(duration / 10)))
+    scene_count = editing_scene_count(duration, profile)
     target_words = round(duration * 2.15)
     system_prompt = (
         "Sen Videoluk adlı profesyonel video üretim platformunun kıdemli Türkçe metin yazarı ve belgesel editörüsün. "
@@ -1798,7 +1806,8 @@ def generate_ai_script(payload: dict) -> dict:
         f"Fikir: {idea}\nVideo türü: {video_type}\nTon: {tone}\nSüre: {duration} saniye\n"
         f"Kurgu yönetmeni şartnamesi: {editing_brief(profile)}\n"
         f"Yaklaşık {target_words} kelimelik, en fazla yüzde 10 sapmalı bir seslendirme yaz. "
-        f"Tam olarak {scene_count} sahne oluştur. Konu çağrı gerektirmiyorsa yapay bir satış çağrısı ekleme; "
+        f"Tam olarak {scene_count} kurgu planı oluştur. Her plan yeni bir görsel fikir taşısın; aynı cümleyi veya görüntü aramasını tekrarlama. "
+        "Kısa planlarda narration tek, doğal ve kısa bir cümle parçası olabilir. Konu çağrı gerektirmiyorsa yapay bir satış çağrısı ekleme; "
         "son sahne anlatıyı anlamlı bir sonuç veya düşündürücü cümleyle kapatsın."
     )
     responses_api = llm_endpoint().endswith("/responses")
