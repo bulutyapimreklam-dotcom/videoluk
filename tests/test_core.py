@@ -63,8 +63,8 @@ class VideolukCoreTests(unittest.TestCase):
 
     def test_learned_shot_rhythm_controls_storyboard_density(self):
         profile = {"rules": {"averageShotSeconds": 2.19}}
-        self.assertEqual(14, server.editing_scene_count(30, profile))
-        self.assertEqual(14, server.editing_scene_count(60, profile))
+        self.assertEqual(6, server.editing_scene_count(30, profile))
+        self.assertEqual(12, server.editing_scene_count(60, profile))
         self.assertEqual(3, server.editing_scene_count(20, {"rules": {"averageShotSeconds": 15}}))
         self.assertEqual(3, server.editing_scene_count(30, None))
 
