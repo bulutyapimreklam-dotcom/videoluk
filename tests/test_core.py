@@ -68,6 +68,18 @@ class VideolukCoreTests(unittest.TestCase):
         self.assertEqual(3, server.editing_scene_count(20, {"rules": {"averageShotSeconds": 15}}))
         self.assertEqual(3, server.editing_scene_count(30, None))
 
+    def test_editing_policy_is_not_used_as_a_transition_name(self):
+        profile = {"id": "dna", "name": "DNA", "rules": server.normalize_editing_rules({
+            "hookSeconds": 3, "averageShotSeconds": 2.2, "rhythm": "Dinamik",
+            "transitionPolicy": "Efekti yalnızca anlatı gerektiriyorsa kullan",
+        })}
+        result = server.apply_editing_profile({"duration": 6, "scenes": [
+            {"title": "Bir", "transition": "cut"}, {"title": "İki", "transition": "fade"},
+        ]}, profile)
+        self.assertEqual("cut", result["scenes"][0]["transition"])
+        self.assertEqual("fade", result["scenes"][1]["transition"])
+        self.assertIn("Geçiş ilkesi", result["scenes"][0]["editingReason"])
+
     def test_voiceover_is_built_only_from_narration_and_rejects_stage_directions(self):
         generated = {"scenes": [
             {"title": "Editoryal başlık", "narration": "Bu cümle doğrudan izleyiciye okunur.", "purpose": "Kanca", "editingReason": "Hızlı giriş", "mediaQuery": "city morning"},

@@ -1542,10 +1542,14 @@ def apply_editing_profile(result: dict, profile: dict | None) -> dict:
     regular = remaining / max(1, len(scenes) - 1)
     for index, scene in enumerate(scenes):
         scene["duration"] = round(hook if index == 0 else regular, 2)
-        scene["transition"] = rules["transitionPolicy"]
+        # The policy is editorial guidance, not an FFmpeg transition name.
+        # Default to an honest hard cut; effects must be explicitly requested.
+        requested_transition = str(scene.get("transition") or "cut").strip().lower()
+        scene["transition"] = "fade" if requested_transition in {"fade", "dissolve", "crossfade"} else "cut"
         scene["editingReason"] = (
             f"{rules['rhythm']} ritim için {scene['duration']:.1f} sn; "
             + ("kanca önceliği" if index == 0 else "anlatı akışını koruyan plan süresi")
+            + f". Geçiş ilkesi: {rules['transitionPolicy']}"
         )
     result["editingProfile"] = {"id": profile["id"], "name": profile["name"]}
     result["editingBrief"] = editing_brief(profile)
@@ -1777,6 +1781,7 @@ def extract_json(text: str) -> dict:
 
 def generate_ai_script(payload: dict) -> dict:
     idea, duration, video_type, tone = validate_script_request(payload)
+    media_source = str(payload.get("source") or "Stok görüntü")
     profile = get_editing_profile(str(payload.get("profileId") or "default"))
     if not LLM_URL or not LLM_MODEL:
         subject = biography_subject(idea)
@@ -1802,8 +1807,15 @@ def generate_ai_script(payload: dict) -> dict:
         "Her sahne için Coverr stok aramasında kullanılabilecek 2-5 kelimelik, somut ve İngilizce mediaQuery yaz. "
         "Kurgu yönetmeninin kurallarını zorunlu yapım şartı olarak uygula."
     )
+    if media_source == "Stok görüntü":
+        system_prompt += (
+            " Görsel kaynak stok görüntüdür. Aynı oyuncunun, kıyafetin, yüzün veya özel nesnenin farklı planlarda birebir "
+            "devam etmesini gerektiren mizansen yazma. Her plan tek başına bulunabilir, somut bir stok görüntüyle anlatılabilsin. "
+            "Buna rağmen bütün planlar aynı ana konu, mekân ve duygu ekseninde kalsın. MediaQuery genel tek kelime değil; "
+            "mekân + özne + eylem biçiminde aranabilir ve anlatımla doğrudan ilgili olsun."
+        )
     user_prompt = (
-        f"Fikir: {idea}\nVideo türü: {video_type}\nTon: {tone}\nSüre: {duration} saniye\n"
+        f"Fikir: {idea}\nVideo türü: {video_type}\nTon: {tone}\nSüre: {duration} saniye\nGörsel kaynak: {media_source}\n"
         f"Kurgu yönetmeni şartnamesi: {editing_brief(profile)}\n"
         f"Yaklaşık {target_words} kelimelik, en fazla yüzde 10 sapmalı bir seslendirme yaz. "
         f"Tam olarak {scene_count} kurgu planı oluştur. Her plan yeni bir görsel fikir taşısın; aynı cümleyi veya görüntü aramasını tekrarlama. "
@@ -2507,7 +2519,14 @@ def build_scene_sequence(job_id: str, scenes: list[dict], duration: int, width: 
     clips_dir.mkdir(exist_ok=True)
     clip_paths = []
     scene_durations = []
-    transition_duration = 0.35 if len(scenes) > 1 else 0.0
+    # Mixed transition graphs easily create false visual grammar. Until a
+    # boundary-by-boundary graph is requested, use fades only when every scene
+    # explicitly asks for one; otherwise preserve professional hard cuts.
+    use_fades = len(scenes) > 1 and all(
+        str(scene.get("transition") or "cut").strip().lower() in {"fade", "dissolve", "crossfade"}
+        for scene in scenes[:-1]
+    )
+    transition_duration = 0.35 if use_fades else 0.0
     for index, scene in enumerate(scenes):
         media = scene.get("media") if isinstance(scene.get("media"), dict) else None
         has_source = media and any(media.get(key) for key in ("videoUrl", "imageUrl", "uploadId", "assetId"))
@@ -2532,6 +2551,16 @@ def build_scene_sequence(job_id: str, scenes: list[dict], duration: int, width: 
     command = [FFMPEG, "-y"]
     for clip_path in clip_paths:
         command += ["-i", str(clip_path)]
+    if not use_fades:
+        streams = "".join(f"[{index}:v]" for index in range(len(clip_paths)))
+        command += [
+            "-filter_complex", f"{streams}concat=n={len(clip_paths)}:v=1:a=0[v]", "-map", "[v]", "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
+            "-t", f"{sum(scene_durations):.3f}", str(sequence),
+        ]
+        run_ffmpeg(command)
+        return sequence
+
     filters = []
     previous = "0:v"
     offset = scene_durations[0]
