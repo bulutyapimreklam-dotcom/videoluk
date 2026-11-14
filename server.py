@@ -2037,7 +2037,7 @@ def direct_visual_selection(payload: dict) -> dict:
     except ValueError:
         previous_thumbnail = ""
     cache_material = json.dumps({
-        "analysisVersion": 2,
+        "analysisVersion": 3,
         "scene": {"subtitle": scene.get("subtitle") or scene.get("sub"), "mediaQuery": scene.get("mediaQuery")},
         "candidateIds": [item.get("id") or thumbnail for _, item, thumbnail, _frames in normalized],
         "previous": (previous or {}).get("id") or previous_thumbnail,
@@ -2082,7 +2082,9 @@ def direct_visual_selection(payload: dict) -> dict:
         with urlopen(request, timeout=LLM_TIMEOUT) as response:
             selection = extract_json(response_output_text(json.loads(response.read().decode("utf-8"))))
         selected_normalized = int(selection.get("selectedIndex", -1))
-        approved = bool(selection.get("approved")) and float(selection.get("relevance") or 0) >= 0.72
+        relevance = float(selection.get("relevance") or 0)
+        continuity = float(selection.get("continuity") or 0)
+        approved = bool(selection.get("approved")) and relevance >= 0.72 and (not previous_thumbnail or continuity >= 0.65)
         original_index = normalized[selected_normalized][0] if approved and 0 <= selected_normalized < len(normalized) else -1
         result = {**selection, "configured": True, "approved": approved, "selectedIndex": original_index}
         with VISUAL_DIRECTOR_CACHE_LOCK:
